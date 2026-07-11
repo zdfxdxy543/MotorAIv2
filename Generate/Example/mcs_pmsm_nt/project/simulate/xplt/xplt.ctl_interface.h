@@ -92,6 +92,7 @@ GMP_STATIC_INLINE void ctl_output_callback(void)
     // Scope 1
     simulink_tx_buffer.monitor[0] = mtr_ctrl.iuvw.dat[phase_A];
     simulink_tx_buffer.monitor[1] = mtr_ctrl.iuvw.dat[phase_B];
+    simulink_tx_buffer.monitor[2] = mech_ctrl.vel_traj.out;
 }
 
 // Enable Motor Controller
