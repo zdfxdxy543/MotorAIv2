@@ -342,16 +342,18 @@ def generate_header(template_text: str, loop_items: List[dict], mech_mode: str) 
 
 
 def generate_paras(template_text: str, mech_mode: str) -> str:
+    """Generate paras.h content for the given control mode.
+
+    Only tunable parameters (gains, bandwidths, limits) are placed inside the
+    ``// Start Paras Define`` block.  Physical constants (INERTIA,
+    TORQUE_CONST, OMEGA_BASE, I_BASE) are written directly into
+    ctl_main.c via the controller setup functions — they never appear in
+    paras.h and are therefore invisible to the tuning agent.
+    """
     insert_lines: List[str] = []
+
     if mech_mode == "smc":
-        # SMC autotuning paras: physical parameters + tuning targets + limits
         insert_lines = [
-            "// SMC physical parameters\n",
-            "#define INERTIA 0.0002f\n",
-            "#define TORQUE_CONST 0.5f\n",
-            "#define OMEGA_BASE 314.159f\n",
-            "#define I_BASE 20.0f\n",
-            "\n",
             "// SMC tuning targets\n",
             "#define TARGET_BW 30.0f\n",
             "#define DIST_REJECT_TORQUE 2.0f\n",
@@ -360,17 +362,10 @@ def generate_paras(template_text: str, mech_mode: str) -> str:
             "#define CUR_LIMIT 1.0f\n",
         ]
     elif mech_mode in ("ladrc_spd", "ladrc_pos"):
-        # LADRC paras: physical parameters + tuning bandwidths + limits
         insert_lines = [
-            "// LADRC physical parameters\n",
-            "#define INERTIA 0.0002f\n",
-            "#define TORQUE_CONST 0.5f\n",
-            "#define OMEGA_BASE 314.159f\n",
-            "#define I_BASE 20.0f\n",
-            "\n",
             "// LADRC tuning targets\n",
-            "#define TARGET_WC 50.0f\n",
-            "#define TARGET_WO 200.0f\n",
+            "#define TARGET_WC 5.0f\n",
+            "#define TARGET_WO 50.0f\n",
             "\n",
             "// Limits\n",
             "#define SPEED_LIMIT 1.0f\n",
@@ -378,7 +373,6 @@ def generate_paras(template_text: str, mech_mode: str) -> str:
             "#define CUR_LIMIT 0.3f\n",
         ]
     elif mech_mode == "pid":
-        # Example3 paras
         insert_lines = [
             "#define POS_KP 5.0f\n",
             "#define POS_KI 1.0f\n",
@@ -387,7 +381,7 @@ def generate_paras(template_text: str, mech_mode: str) -> str:
             "#define VEL_KI 0.0f\n",
             "\n",
             "#define SPEED_LIMIT 1.0f\n",
-            "#define SPEED_SLOPE_LIMIT 0.1f\n",
+            "#define SPEED_SLOPE_LIMIT 1.0f\n",
             "#define CUR_LIMIT 0.3f\n",
         ]
 

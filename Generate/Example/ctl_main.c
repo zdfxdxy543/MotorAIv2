@@ -417,11 +417,11 @@ void Setup_Motor_Current()
 //     smc_init.fs = CONTROLLER_FREQUENCY;
 //     smc_init.mech_division = CTRL_MECH_DIV;
 //
-//     smc_init.inertia = INERTIA;
-//     smc_init.torque_const = TORQUE_CONST;
+//     smc_init.inertia = (MOTOR_PARAM_INERTIA * 1e-7f);
+//     smc_init.torque_const = (1.5f * MOTOR_PARAM_POLE_PAIRS * MOTOR_PARAM_FLUX);
 //
-//     smc_init.omega_base = OMEGA_BASE;
-//     smc_init.i_base = I_BASE;
+//     smc_init.omega_base = (MOTOR_PARAM_MAX_SPEED * 6.283185307f / 60.0f);
+//     smc_init.i_base = MOTOR_PARAM_RATED_CURRENT;
 //
 //     smc_init.cur_limit = CUR_LIMIT;
 //
@@ -439,11 +439,11 @@ void Setup_Motor_Current()
 //     ladrc_spd_init.fs = CONTROLLER_FREQUENCY;
 //     ladrc_spd_init.mech_division = CTRL_MECH_DIV;
 //
-//     ladrc_spd_init.inertia = INERTIA;
-//     ladrc_spd_init.torque_const = TORQUE_CONST;
+//     ladrc_spd_init.inertia = (MOTOR_PARAM_INERTIA * 1e-7f);
+//     ladrc_spd_init.torque_const = (1.5f * MOTOR_PARAM_POLE_PAIRS * MOTOR_PARAM_FLUX);
 //
-//     ladrc_spd_init.omega_base = OMEGA_BASE;
-//     ladrc_spd_init.i_base = I_BASE;
+//     ladrc_spd_init.omega_base = (MOTOR_PARAM_MAX_SPEED * 6.283185307f / 60.0f);
+//     ladrc_spd_init.i_base = MOTOR_PARAM_RATED_CURRENT;
 //
 //     ladrc_spd_init.speed_limit = SPEED_LIMIT;
 //     ladrc_spd_init.speed_slope_limit = SPEED_SLOPE_LIMIT;
@@ -462,11 +462,11 @@ void Setup_Motor_Current()
 //     ladrc_pos_init.fs = CONTROLLER_FREQUENCY;
 //     ladrc_pos_init.mech_division = CTRL_MECH_DIV;
 //
-//     ladrc_pos_init.inertia = INERTIA;
-//     ladrc_pos_init.torque_const = TORQUE_CONST;
+//     ladrc_pos_init.inertia = (MOTOR_PARAM_INERTIA * 1e-7f);
+//     ladrc_pos_init.torque_const = (1.5f * MOTOR_PARAM_POLE_PAIRS * MOTOR_PARAM_FLUX);
 //
-//     ladrc_pos_init.omega_base = OMEGA_BASE;
-//     ladrc_pos_init.i_base = I_BASE;
+//     ladrc_pos_init.omega_base = (MOTOR_PARAM_MAX_SPEED * 6.283185307f / 60.0f);
+//     ladrc_pos_init.i_base = MOTOR_PARAM_RATED_CURRENT;
 //
 //     ladrc_pos_init.cur_limit = CUR_LIMIT;
 //

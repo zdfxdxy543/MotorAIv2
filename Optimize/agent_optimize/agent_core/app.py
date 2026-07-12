@@ -640,15 +640,25 @@ def run_headless_job(
             allowed_params[original_name] = inferred
             auto_added.append(original_name)
 
+        # ── 删除 header 中已不存在的参数 ──────────────────────────
+        removed: list[str] = []
+        if nonexistent:
+            for name in sorted(nonexistent):
+                for ak in list(allowed_params.keys()):
+                    if str(ak).upper() == name:
+                        del allowed_params[ak]
+                        removed.append(str(ak))
+                        break
+
         if auto_added:
             print(
                 f"[headless] ⚡ auto-completed {len(auto_added)} missing tuning_policy "
                 f"parameter(s): {', '.join(auto_added)}"
             )
-        if nonexistent:
+        if removed:
             print(
-                f"[headless] ⚠ tuning_policy lists {len(nonexistent)} parameter(s) "
-                f"not found in header: {', '.join(sorted(nonexistent))}"
+                f"[headless] 🗑 removed {len(removed)} obsolete tuning_policy "
+                f"parameter(s) not found in header: {', '.join(removed)}"
             )
 
         # 回写 job dict（LLM prompt 会看到补全后的白名单）
@@ -667,8 +677,9 @@ def run_headless_job(
             "policy_param_count": len(allowed_params),
             "policy_parameters": sorted(allowed_params.keys()),
             "auto_added": auto_added,
+            "removed": removed,
             "nonexistent_in_policy": sorted(nonexistent),
-            "is_coverage_complete": len(missing) == 0 or len(auto_added) == len(missing),
+            "is_coverage_complete": (len(missing) == 0 or len(auto_added) == len(missing)) and len(removed) == len(nonexistent),
         }
         write_result_json(result_file, result)
 

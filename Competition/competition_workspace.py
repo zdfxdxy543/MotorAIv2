@@ -1159,6 +1159,16 @@ def sync_tuning_policy_with_header(candidate_json: Path) -> dict[str, Any]:
         allowed_params[original_name] = inferred
         auto_added.append(original_name)
 
+    # ── remove nonexistent: 删除 policy 中 header 已不存在的参数 ──
+    removed: list[str] = []
+    if nonexistent:
+        for name in sorted(nonexistent):
+            for ak in list(allowed_params.keys()):
+                if str(ak).upper() == name:
+                    del allowed_params[ak]
+                    removed.append(str(ak))
+                    break
+
     # ── persist back to candidate.json ──────────────────────────────
     if tuning_policy is not candidate.get("tuning_policy"):
         candidate["tuning_policy"] = dict(candidate.get("tuning_policy", {}))
@@ -1186,6 +1196,12 @@ def sync_tuning_policy_with_header(candidate_json: Path) -> dict[str, Any]:
                 parent_ap.update(
                     {name: allowed_params[name] for name in auto_added}
                 )
+                # remove entries that no longer exist in header
+                for name in removed:
+                    for pk in list(parent_ap.keys()):
+                        if str(pk).upper() == name.upper():
+                            del parent_ap[pk]
+                            break
                 parent["tuning_policy"]["allowed_parameters"] = parent_ap
                 write_json(parent_path, parent)
                 parent_updated = True
@@ -1199,6 +1215,7 @@ def sync_tuning_policy_with_header(candidate_json: Path) -> dict[str, Any]:
         "policy_param_before": len(policy_names),
         "policy_param_after": len(allowed_params),
         "auto_added": auto_added,
+        "removed": removed,
         "nonexistent_in_policy": sorted(nonexistent) if nonexistent else [],
     }
 
@@ -1207,10 +1224,10 @@ def sync_tuning_policy_with_header(candidate_json: Path) -> dict[str, Any]:
             f"  [tuning_policy] auto-completed {len(auto_added)} parameter(s): "
             f"{', '.join(auto_added)}"
         )
-    if nonexistent:
+    if removed:
         print(
-            f"  [tuning_policy] warning: {len(nonexistent)} parameter(s) in whitelist "
-            f"not found in header: {', '.join(sorted(nonexistent))}"
+            f"  [tuning_policy] removed {len(removed)} obsolete parameter(s) "
+            f"not found in header: {', '.join(removed)}"
         )
 
     return summary
