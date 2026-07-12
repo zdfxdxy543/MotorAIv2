@@ -313,6 +313,7 @@ def stop_condition_met(evaluation_result: Dict[str, Any], stop_conditions: Dict[
       - metric_error_count_max or max_metric_error_count
       - metric_ok_count_min
       - status_equals
+      - metric_score_min
     If no supported stop condition is supplied, this returns False so the job
     runs until max_iterations.
     """
@@ -363,6 +364,21 @@ def stop_condition_met(evaluation_result: Dict[str, Any], stop_conditions: Dict[
         expected_status = str(stop_conditions["status_equals"])
         actual_status = str(evaluation_result.get("status"))
         if actual_status != expected_status:
+            return False
+
+    if "metric_score_min" in stop_conditions:
+        checked_any = True
+        try:
+            actual_min = evaluation_result.get("min_metric_score")
+            required_min = float(stop_conditions["metric_score_min"])
+        except (TypeError, ValueError):
+            return False
+        if actual_min is None:
+            return False
+        try:
+            if float(actual_min) < required_min:
+                return False
+        except (TypeError, ValueError):
             return False
 
     return checked_any
@@ -426,12 +442,17 @@ def _compact_evaluation_summary(evaluation_result: Dict[str, Any]) -> Dict[str, 
         "status",
         "task_type",
         "overall_score",
+        "min_metric_score",
         "metric_ok_count",
         "metric_error_count",
         "warning_count",
         "error_count",
     ]
-    return {key: evaluation_result.get(key) for key in keys if key in evaluation_result}
+    compact = {key: evaluation_result.get(key) for key in keys if key in evaluation_result}
+    scoring_summary = evaluation_result.get("scoring_summary")
+    if isinstance(scoring_summary, dict):
+        compact["scoring_summary"] = scoring_summary
+    return compact
 
 
 def _build_setup_prompt(job: Dict[str, Any], job_file: Path) -> str:

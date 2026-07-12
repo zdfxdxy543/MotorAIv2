@@ -64,11 +64,11 @@ def _build_tuning_policy_from_loops(selected_loops):
     if 'current_loop' in loop_names or 'current_error_loop' in loop_names:
         allowed_parameters['CUR_KP'] = {'min': 1.0, 'max': 500.0, 'description': '电流环比例增益'}
         allowed_parameters['CUR_KI'] = {'min': 0.0, 'max': 12000.0, 'description': '电流环积分增益'}
-        allowed_parameters['CUR_LIMIT'] = {'min': 0.05, 'max': 10.0, 'description': '电流限幅'}
+        allowed_parameters['CUR_LIMIT'] = {'min': 0.05, 'max': 1.0, 'description': '电流限幅'}
     if 'speed_loop' in loop_names or 'speed_error_loop' in loop_names or 'mech_loop' in loop_names:
         allowed_parameters['VEL_KP'] = {'min': 0.1, 'max': 20.0, 'description': '速度环比例增益'}
         allowed_parameters['VEL_KI'] = {'min': 0.0, 'max': 5.0, 'description': '速度环积分增益'}
-        allowed_parameters['CUR_LIMIT'] = {'min': 0.05, 'max': 10.0, 'description': '电流限幅'}
+        allowed_parameters['CUR_LIMIT'] = {'min': 0.05, 'max': 1.0, 'description': '电流限幅'}
     if 'position_loop' in loop_names or 'position_error_loop' in loop_names:
         allowed_parameters['POS_KP'] = {'min': 0.1, 'max': 50.0, 'description': '位置环比例增益'}
         allowed_parameters['POS_KI'] = {'min': 0.0, 'max': 10.0, 'description': '位置环积分增益'}

@@ -378,7 +378,7 @@ def generate_paras(template_text: str, mech_mode: str) -> str:
             "// Limits\n",
             "#define SPEED_LIMIT 1.0f\n",
             "#define SPEED_SLOPE_LIMIT 0.1f\n",
-            "#define CUR_LIMIT 0.3f\n",
+            "#define CUR_LIMIT 0.5f\n",
         ]
     elif mech_mode == "pid":
         insert_lines = [
@@ -392,8 +392,8 @@ def generate_paras(template_text: str, mech_mode: str) -> str:
             "#define CUR_KI 1200.0f\n",
             "\n",
             "#define SPEED_LIMIT 1.0f\n",
-            "#define SPEED_SLOPE_LIMIT 1.0f\n",
-            "#define CUR_LIMIT 0.3f\n",
+            "#define SPEED_SLOPE_LIMIT 0.7f\n",
+            "#define CUR_LIMIT 0.5f\n",
         ]
 
     return replace_section(template_text, "// Start Paras Define", "// End Paras Define", insert_lines)

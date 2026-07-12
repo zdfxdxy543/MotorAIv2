@@ -379,8 +379,10 @@ def _add_scores_safely(result: dict[str, Any]) -> dict[str, Any]:
     except ScoringError as exc:
         result.setdefault("warnings", []).append(f"scoring skipped: {type(exc).__name__}: {exc}")
         result.setdefault("overall_score", None)
+        result.setdefault("min_metric_score", None)
         result.setdefault("scoring_summary", {
             "overall_score": None,
+            "min_metric_score": None,
             "scored_metric_count": 0,
             "skipped_metric_count": 0,
             "total_score_weight": 0.0,

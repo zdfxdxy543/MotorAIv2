@@ -235,6 +235,7 @@ def read_score(candidate_dir: Path) -> dict[str, Any]:
         "status": data.get("status"),
         "stop_reason": data.get("stop_reason"),
         "overall_score": score,
+        "final_evaluation": final_evaluation,
         "metric_error_count": final_evaluation.get("metric_error_count"),
         "metric_ok_count": final_evaluation.get("metric_ok_count"),
         "tuning_result": str(result_path.resolve()),
@@ -301,6 +302,25 @@ def stop_conditions_met(score_item: dict[str, Any], stop_conditions: dict[str, A
     if "status_equals" in stop_conditions:
         checked_any = True
         if str(score_item.get("status")) != str(stop_conditions.get("status_equals")):
+            return False
+
+    if "metric_score_min" in stop_conditions:
+        checked_any = True
+        try:
+            min_required = float(stop_conditions["metric_score_min"])
+        except (TypeError, ValueError):
+            return False
+        final_eval = score_item.get("final_evaluation")
+        if isinstance(final_eval, dict):
+            actual_min = final_eval.get("min_metric_score")
+        else:
+            actual_min = None
+        if actual_min is None:
+            return False
+        try:
+            if float(actual_min) < min_required:
+                return False
+        except (TypeError, ValueError):
             return False
 
     return checked_any

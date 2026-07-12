@@ -79,72 +79,118 @@ def score_metric(
     good_threshold: float,
     bad_threshold: float,
     optimization_direction: str,
+    *,
+    perfect_threshold: float | None = None,
 ) -> float:
     """
-    Normalize one metric value to a 0..100 score.
+    Normalize one metric value to a 0..100 score using two-segment interpolation.
+
+    Segment 1 — unacceptable to good:  bad → 0,  good → 80  (linear)
+    Segment 2 — good to perfect:      good → 80, perfect → 100 (linear)
 
     For optimization_direction="minimize":
-        - value <= good_threshold -> 100
-        - value >= bad_threshold  -> 0
-        - linear interpolation in between
+        - perfect_threshold defaults to 0 (the theoretical minimum).
+        - value ≤ perfect       → 100
+        - perfect < value ≤ good → 80 + 20·(good − value) / (good − perfect)
+        - good < value ≤ bad    → 80·(bad − value) / (bad − good)
+        - value > bad           → 0
 
     For optimization_direction="maximize":
-        - value >= good_threshold -> 100
-        - value <= bad_threshold  -> 0
-        - linear interpolation in between
+        - perfect_threshold defaults to good + (good − bad), i.e. symmetric span.
+        - value ≥ perfect       → 100
+        - good ≤ value < perfect → 80 + 20·(value − good) / (perfect − good)
+        - bad < value < good    → 80·(value − bad) / (good − bad)
+        - value ≤ bad           → 0
+
+    Pass perfect_threshold=None to restore the legacy single-segment behaviour
+    where good maps directly to 100.
 
     Args:
-        value:
-            Scalar metric value.
-
-        good_threshold:
-            Value considered good enough.
-
-        bad_threshold:
-            Value considered unacceptable.
-
-        optimization_direction:
-            "minimize" or "maximize".
+        value: Scalar metric value.
+        good_threshold: Value considered good enough (maps to 80).
+        bad_threshold: Value considered unacceptable (maps to 0).
+        optimization_direction: "minimize" or "maximize".
+        perfect_threshold: Ideal / perfect value (maps to 100).
+            Defaults to 0 for minimize; good+(good−bad) for maximize.
+            Pass ``None`` for legacy single-segment mode.
 
     Returns:
         Score in [0, 100].
 
     Raises:
-        ThresholdConfigError:
-            If thresholds are missing, non-finite, equal, or have the wrong
-            ordering for the direction.
-
-        MetricScoreError:
-            If value is not a finite scalar or direction is unsupported.
+        ThresholdConfigError: If thresholds have wrong ordering.
+        MetricScoreError: If value is not a finite scalar or direction is unsupported.
     """
     metric_value = _coerce_finite_float(value, "value", MetricScoreError)
     good = _coerce_finite_float(good_threshold, "good_threshold", ThresholdConfigError)
     bad = _coerce_finite_float(bad_threshold, "bad_threshold", ThresholdConfigError)
     direction = _normalize_direction(optimization_direction)
 
+    # ── legacy single-segment mode ──────────────────────────────────────
+    if perfect_threshold is None:
+        if direction == "minimize":
+            if good >= bad:
+                raise ThresholdConfigError(
+                    "For minimize metrics, good_threshold must be smaller than bad_threshold. "
+                    f"Got good_threshold={good}, bad_threshold={bad}."
+                )
+            if metric_value <= good:
+                return _SCORE_MAX
+            if metric_value >= bad:
+                return _SCORE_MIN
+            return _clamp_score((bad - metric_value) / (bad - good) * _SCORE_MAX)
+
+        if direction == "maximize":
+            if good <= bad:
+                raise ThresholdConfigError(
+                    "For maximize metrics, good_threshold must be larger than bad_threshold. "
+                    f"Got good_threshold={good}, bad_threshold={bad}."
+                )
+            if metric_value >= good:
+                return _SCORE_MAX
+            if metric_value <= bad:
+                return _SCORE_MIN
+            return _clamp_score((metric_value - bad) / (good - bad) * _SCORE_MAX)
+
+        raise MetricScoreError(
+            f"optimization_direction must be 'minimize' or 'maximize', got {optimization_direction!r}."
+        )
+
+    # ── two-segment mode ────────────────────────────────────────────────
+    perfect = _coerce_finite_float(perfect_threshold, "perfect_threshold", ThresholdConfigError)
+    _GOOD_SCORE = 80.0  # score assigned to good_threshold
+
     if direction == "minimize":
-        if good >= bad:
+        if not (perfect < good < bad):
             raise ThresholdConfigError(
-                "For minimize metrics, good_threshold must be smaller than bad_threshold. "
-                f"Got good_threshold={good}, bad_threshold={bad}."
+                "For minimize metrics, must have perfect_threshold < good_threshold < bad_threshold. "
+                f"Got perfect={perfect}, good={good}, bad={bad}."
             )
-        if metric_value <= good:
+        if metric_value <= perfect:
             return _SCORE_MAX
         if metric_value >= bad:
             return _SCORE_MIN
-        return _clamp_score((bad - metric_value) / (bad - good) * _SCORE_MAX)
+        if metric_value <= good:
+            # perfect→100  …  good→80
+            return _clamp_score(_SCORE_MAX - (_SCORE_MAX - _GOOD_SCORE) * (metric_value - perfect) / (good - perfect))
+        # good→80  …  bad→0
+        return _clamp_score(_GOOD_SCORE * (bad - metric_value) / (bad - good))
 
     if direction == "maximize":
-        if good <= bad:
+        if not (bad < good < perfect):
             raise ThresholdConfigError(
-                "For maximize metrics, good_threshold must be larger than bad_threshold. "
-                f"Got good_threshold={good}, bad_threshold={bad}."
+                "For maximize metrics, must have bad_threshold < good_threshold < perfect_threshold. "
+                f"Got bad={bad}, good={good}, perfect={perfect}."
             )
-        if metric_value >= good:
+        if metric_value >= perfect:
             return _SCORE_MAX
         if metric_value <= bad:
             return _SCORE_MIN
-        return _clamp_score((metric_value - bad) / (good - bad) * _SCORE_MAX)
+        if metric_value >= good:
+            # good→80  …  perfect→100
+            return _clamp_score(_GOOD_SCORE + (_SCORE_MAX - _GOOD_SCORE) * (metric_value - good) / (perfect - good))
+        # bad→0  …  good→80
+        return _clamp_score(_GOOD_SCORE * (metric_value - bad) / (good - bad))
 
     raise MetricScoreError(
         f"optimization_direction must be 'minimize' or 'maximize', got {optimization_direction!r}."
@@ -215,6 +261,7 @@ def score_metric_results(metric_results: Mapping[str, Any]) -> dict[str, Any]:
     total_weight = 0.0
     scored_count = 0
     skipped_count = 0
+    min_score: float | None = None
 
     for metric_key, raw_metric_result in metric_results.items():
         if not isinstance(metric_key, str) or not metric_key.strip():
@@ -236,6 +283,8 @@ def score_metric_results(metric_results: Mapping[str, Any]) -> dict[str, Any]:
             weighted_sum += score_value * weight
             total_weight += weight
             scored_count += 1
+            if min_score is None or score_value < min_score:
+                min_score = score_value
         else:
             skipped_count += 1
             reason = score_info.get("score_skip_reason") or score_info.get("score_error")
@@ -245,6 +294,7 @@ def score_metric_results(metric_results: Mapping[str, Any]) -> dict[str, Any]:
 
     return {
         "overall_score": overall_score,
+        "min_metric_score": min_score,
         "scored_metric_count": scored_count,
         "skipped_metric_count": skipped_count,
         "total_score_weight": total_weight,
@@ -283,8 +333,10 @@ def add_scores_to_evaluation_result(evaluation_result: Mapping[str, Any]) -> dic
     result_copy = deepcopy(dict(evaluation_result))
     result_copy["metrics"] = scored["metrics"]
     result_copy["overall_score"] = scored["overall_score"]
+    result_copy["min_metric_score"] = scored["min_metric_score"]
     result_copy["scoring_summary"] = {
         "overall_score": scored["overall_score"],
+        "min_metric_score": scored["min_metric_score"],
         "scored_metric_count": scored["scored_metric_count"],
         "skipped_metric_count": scored["skipped_metric_count"],
         "total_score_weight": scored["total_score_weight"],
@@ -326,7 +378,21 @@ def _try_score_one_metric(metric_key: str, metric_result: Mapping[str, Any]) -> 
     if thresholds is None:
         return _skipped(_SKIP_REASON_NO_THRESHOLD, score_weight=score_weight)
 
-    good_threshold, bad_threshold = thresholds
+    good_threshold, bad_threshold, perfect_threshold = thresholds
+
+    # ── 兼容旧 evaluation_config ──────────────────────────────────────
+    # 旧的 evaluation_config.json 不含 perfect_threshold，如果走 legacy
+    # 单段模式（good→100），会与新模板生成的两段式评分结果不可比。
+    # 这里自动补全：minimize 以 0 为理想值，maximize 以对称跨度推导。
+    if perfect_threshold is None:
+        if direction == "minimize":
+            perfect_threshold = 0.0
+        elif direction == "maximize":
+            span = good_threshold - bad_threshold
+            if span > 0:
+                perfect_threshold = good_threshold + span
+            else:
+                perfect_threshold = good_threshold * 2.0
 
     try:
         score = score_metric(
@@ -334,6 +400,7 @@ def _try_score_one_metric(metric_key: str, metric_result: Mapping[str, Any]) -> 
             good_threshold=good_threshold,
             bad_threshold=bad_threshold,
             optimization_direction=str(direction),
+            perfect_threshold=perfect_threshold,
         )
     except ScoringError as exc:
         return _score_error(exc, score_weight=score_weight)
@@ -344,15 +411,17 @@ def _try_score_one_metric(metric_key: str, metric_result: Mapping[str, Any]) -> 
         "score_weight": score_weight,
         "score_good_threshold": float(good_threshold),
         "score_bad_threshold": float(bad_threshold),
+        "score_perfect_threshold": float(perfect_threshold) if perfect_threshold is not None else None,
         "score_optimization_direction": direction,
         "score_skip_reason": None,
         "score_error": None,
     }
 
 
-def _extract_thresholds(metric_result: Mapping[str, Any]) -> tuple[float, float] | None:
+def _extract_thresholds(metric_result: Mapping[str, Any]) -> tuple[float, float, float | None] | None:
     good_raw = metric_result.get("good_threshold")
     bad_raw = metric_result.get("bad_threshold")
+    perfect_raw = metric_result.get("perfect_threshold")
 
     extra = metric_result.get("extra")
     if isinstance(extra, Mapping):
@@ -360,13 +429,16 @@ def _extract_thresholds(metric_result: Mapping[str, Any]) -> tuple[float, float]
             good_raw = extra.get("good_threshold")
         if bad_raw is None:
             bad_raw = extra.get("bad_threshold")
+        if perfect_raw is None:
+            perfect_raw = extra.get("perfect_threshold")
 
     if good_raw is None or bad_raw is None:
         return None
 
     good = _coerce_finite_float(good_raw, "good_threshold", ThresholdConfigError)
     bad = _coerce_finite_float(bad_raw, "bad_threshold", ThresholdConfigError)
-    return good, bad
+    perfect = _coerce_finite_float(perfect_raw, "perfect_threshold", ThresholdConfigError) if perfect_raw is not None else None
+    return good, bad, perfect
 
 
 def _skipped(reason: str, *, score_weight: float | None = None) -> dict[str, Any]:

@@ -133,6 +133,7 @@ def _choose_winner(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
     return {
         "candidate_id": winner["candidate_id"],
         "overall_score": winner["overall_score"],
+        "final_evaluation": winner.get("final_evaluation", {}),
     }
 
 
@@ -275,6 +276,24 @@ def _check_stop_conditions(winner: dict[str, Any] | None, stop_conditions: dict[
     if "overall_score_min" in stop_conditions:
         try:
             if float(score) < float(stop_conditions["overall_score_min"]):
+                return False
+        except (TypeError, ValueError):
+            return False
+
+    if "metric_score_min" in stop_conditions:
+        try:
+            min_required = float(stop_conditions["metric_score_min"])
+        except (TypeError, ValueError):
+            return False
+        final_eval = winner.get("final_evaluation")
+        if isinstance(final_eval, dict):
+            actual_min = final_eval.get("min_metric_score")
+        else:
+            actual_min = None
+        if actual_min is None:
+            return False
+        try:
+            if float(actual_min) < min_required:
                 return False
         except (TypeError, ValueError):
             return False

@@ -221,9 +221,60 @@ def build_user_prompt(requirement: str) -> str:
     )
 
 
+def _sanitize_json_control_chars(text: str) -> str:
+    """Escape literal control characters that appear inside JSON string values.
+
+    LLMs occasionally return JSON with unescaped newlines / carriage returns /
+    tabs inside string values, which breaks ``json.loads``.  This state-machine
+    pass finds every ``"…"`` span and rewrites the offending bytes so that the
+    result is standards-compliant JSON.
+    """
+    CONTROL_MAP = {
+        '\n': '\\n',
+        '\r': '\\r',
+        '\t': '\\t',
+        '\b': '\\b',
+        '\f': '\\f',
+    }
+    out: list[str] = []
+    in_string = False
+    escape_next = False
+
+    for ch in text:
+        if escape_next:
+            out.append(ch)
+            escape_next = False
+            continue
+
+        if ch == '\\':
+            out.append(ch)
+            escape_next = True
+            continue
+
+        if ch == '"':
+            in_string = not in_string
+            out.append(ch)
+            continue
+
+        if in_string:
+            ordinal = ord(ch)
+            if ordinal <= 0x1F:
+                out.append(CONTROL_MAP.get(ch, f'\\u{ordinal:04x}'))
+                continue
+
+        out.append(ch)
+
+    return ''.join(out)
+
+
 def parse_loop_json(text: str) -> dict[str, Any]:
     cleaned = strip_code_fence(text)
-    data = json.loads(cleaned)
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError:
+        # LLM 返回的 JSON 字符串里可能夹带了未转义的控制字符，先清洗再重试
+        cleaned = _sanitize_json_control_chars(cleaned)
+        data = json.loads(cleaned)
     if not isinstance(data, dict):
         raise ValueError("model response is not a JSON object")
     return data

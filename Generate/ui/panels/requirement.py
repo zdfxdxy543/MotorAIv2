@@ -398,6 +398,7 @@ class RequirementPanel(QWidget):
             "metric_name": "overshoot",
             "optimization_direction": "minimize",
             "normalize": True,
+            "perfect_threshold": 0.0,
             "good_threshold": 0.10,
             "bad_threshold": 0.30,
             "description": "超调量，归一化后 0.10 表示 10%"
@@ -406,6 +407,7 @@ class RequirementPanel(QWidget):
             "metric_name": "settling_time",
             "optimization_direction": "minimize",
             "tolerance_ratio": 0.05,
+            "perfect_threshold": 0.0,
             "good_threshold": 0.20,
             "bad_threshold": 1.00,
             "description": "调节时间，进入并保持在目标值 ±5% 范围内所需时间"
@@ -414,14 +416,17 @@ class RequirementPanel(QWidget):
             "metric_name": "steady_state_error",
             "optimization_direction": "minimize",
             "window": 0.10,
+            "perfect_threshold": 0.0,
             "good_threshold": 15.708,
             "bad_threshold": 62.832,
+            "weight": 0.35,
             "description": "稳态误差，末尾 10% 数据窗口内的平均绝对误差"
         },
         "ripple": {
             "metric_name": "ripple",
             "optimization_direction": "minimize",
             "window": 0.10,
+            "perfect_threshold": 0.0,
             "good_threshold": 0.02,
             "bad_threshold": 0.20,
             "description": "稳态纹波，末尾 10% 数据窗口内的峰峰值"
@@ -431,6 +436,7 @@ class RequirementPanel(QWidget):
             "optimization_direction": "minimize",
             "lower_ratio": 0.10,
             "upper_ratio": 0.90,
+            "perfect_threshold": 0.0,
             "good_threshold": 0.10,
             "bad_threshold": 1.00,
             "description": "上升时间，信号从目标值 10% 上升到 90% 所需时间"
@@ -565,7 +571,7 @@ class RequirementPanel(QWidget):
 
     # ── 用户可编辑字段：下次生成时从旧 metrics 中保留 ──
     _PRESERVABLE_FIELDS = (
-        'target_value', 'good_threshold', 'bad_threshold',
+        'target_value', 'good_threshold', 'bad_threshold', 'perfect_threshold',
         'weight', 'tolerance_ratio', 'window', 'normalize',
     )
 
@@ -695,7 +701,7 @@ class RequirementPanel(QWidget):
         return collected
 
     def _apply_constraints(self, constraints, signal_name, existing_metrics, existing_targets,
-                           signal_target_overrides=None):
+                           signal_target_overrides=None, *, template_good=None, template_bad=None):
         """将 LLM 提取的约束转换为 metric 字段覆盖值。
 
         LLM 只负责从用户原文中提取数值和类型，Python 负责所有数学转换。
@@ -703,11 +709,20 @@ class RequirementPanel(QWidget):
 
         signal_target_overrides: 预计算好的 {signal_name: target_value}，优先于
             _get_reference_target 的查询结果，确保百分比转换使用用户最新指定的目标值。
+
+        template_good / template_bad: 模板中定义的原始阈值，用于按模板比例推导
+            bad_threshold，避免统一乘 5.0 的粗糙做法。
         """
         if not constraints:
             return {}
         overrides = {}
         ref_target = None  # 惰性计算
+
+        # 计算模板的 bad/good 比例，combo-level 约束用它来推导 bad_threshold
+        template_ratio = None
+        if (template_good is not None and template_bad is not None
+                and template_good > 0 and template_bad > template_good):
+            template_ratio = template_bad / template_good
 
         for c in constraints:
             if not isinstance(c, dict):
@@ -739,7 +754,10 @@ class RequirementPanel(QWidget):
                 if ref_target and ref_target != 0:
                     overrides['good_threshold'] = value / 100.0 * abs(ref_target)
                     if 'bad_threshold' not in overrides and overrides['good_threshold'] > 0:
-                        overrides['bad_threshold'] = overrides['good_threshold'] * 5.0
+                        if template_ratio is not None:
+                            overrides['bad_threshold'] = round(overrides['good_threshold'] * template_ratio, 6)
+                        else:
+                            overrides['bad_threshold'] = overrides['good_threshold'] * 5.0
 
             # target_* 约束不在此处处理——由 _collect_signal_targets 预先聚合
 
@@ -909,6 +927,8 @@ class RequirementPanel(QWidget):
                 constraint_overrides = self._apply_constraints(
                     constraints, signal_name, existing_metrics, existing_targets,
                     signal_target_overrides=signal_target_overrides,
+                    template_good=param_template.get('good_threshold'),
+                    template_bad=param_template.get('bad_threshold'),
                 )
                 metric.update(constraint_overrides)
 
@@ -1091,7 +1111,8 @@ class RequirementPanel(QWidget):
                 data = json.load(f)
             data['stop_conditions'] = {
                 'overall_score_min': 85,
-                'metric_error_count_max': 0
+                'metric_error_count_max': 0,
+                'metric_score_min': 80,
             }
             with open(project_json, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
