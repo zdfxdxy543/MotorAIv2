@@ -55,7 +55,6 @@ from Competition.competition_workspace import (
 WELCOME_GIF_SIZE = 50
 INPUT_CARD_RADIUS = 16
 WELCOME_INPUT_MAX_WIDTH = 1020
-CHAT_INPUT_MAX_WIDTH = 1020
 
 
 def _build_tuning_policy_from_loops(selected_loops):
@@ -504,9 +503,11 @@ class MainProgramPanel(QWidget):
         self.input_dock.setAttribute(Qt.WA_StyledBackground, True)
         self.input_dock.setStyleSheet('QWidget#floatingInputDock{background:transparent;border:none;}')
         input_dock_layout = QHBoxLayout(self.input_dock)
-        input_dock_layout.setContentsMargins(0, 4, 0, 10)
+        # Keep the composer aligned with the chat content at every window
+        # width. The previous centered 1020 px cap left large empty gutters on
+        # 2K displays even though the conversation viewport kept expanding.
+        input_dock_layout.setContentsMargins(24, 4, 24, 10)
         input_dock_layout.setSpacing(0)
-        input_dock_layout.addStretch(1)
 
         self.input_row = QFrame()
         self.input_row.setObjectName('floatingInputCard')
@@ -550,8 +551,7 @@ class MainProgramPanel(QWidget):
 
         input_layout.addWidget(self.input_edit, 1)
         input_layout.addWidget(input_actions)
-        input_dock_layout.addWidget(self.input_row, 0, Qt.AlignCenter)
-        input_dock_layout.addStretch(1)
+        input_dock_layout.addWidget(self.input_row, 1)
 
         self.action_row = QWidget()
         action_layout = QHBoxLayout(self.action_row)
@@ -637,20 +637,20 @@ class MainProgramPanel(QWidget):
         quick_action_layout.setContentsMargins(0, 20, 0, 0)
         quick_action_layout.setSpacing(16)
         
-        self.btn_vacuum = QPushButton('设计吸尘器驱动器')
+        self.btn_vacuum = QPushButton('设计PID转速控制')
         self.btn_vacuum.setStyleSheet(flat_button_qss() + 'QPushButton{min-width:160px;}')
         self.btn_vacuum.setFlat(True)
-        self.btn_vacuum.clicked.connect(lambda: self._apply_quick_template('吸尘器驱动器'))
+        self.btn_vacuum.clicked.connect(lambda: self._apply_quick_template('PID转速控制'))
         
-        self.btn_servo = QPushButton('设计伺服电机驱动器')
+        self.btn_servo = QPushButton('设计LADRC转速控制')
         self.btn_servo.setStyleSheet(flat_button_qss() + 'QPushButton{min-width:180px;}')
         self.btn_servo.setFlat(True)
-        self.btn_servo.clicked.connect(lambda: self._apply_quick_template('伺服电机驱动器'))
+        self.btn_servo.clicked.connect(lambda: self._apply_quick_template('LADRC转速控制'))
         
-        self.btn_current = QPushButton('设计电流环驱动器')
+        self.btn_current = QPushButton('设计位置伺服控制')
         self.btn_current.setStyleSheet(flat_button_qss() + 'QPushButton{min-width:160px;}')
         self.btn_current.setFlat(True)
-        self.btn_current.clicked.connect(lambda: self._apply_quick_template('电流环驱动器'))
+        self.btn_current.clicked.connect(lambda: self._apply_quick_template('位置伺服控制'))
         
         quick_action_layout.addWidget(self.btn_vacuum)
         quick_action_layout.addWidget(self.btn_servo)
@@ -678,12 +678,9 @@ class MainProgramPanel(QWidget):
     def _sync_input_widths(self):
         available = max(320, self.width())
         welcome_width = min(WELCOME_INPUT_MAX_WIDTH, available)
-        chat_width = min(CHAT_INPUT_MAX_WIDTH, available)
 
         if hasattr(self, 'welcome_input_shell'):
             self.welcome_input_shell.setFixedWidth(welcome_width)
-        if hasattr(self, 'input_row'):
-            self.input_row.setFixedWidth(chat_width)
 
     def show_welcome_overlay(self):
         while self.main_layout.count():
@@ -897,9 +894,9 @@ class MainProgramPanel(QWidget):
 
     def _apply_quick_template(self, template_type):
         templates = {
-            '吸尘器驱动器': '设计一个高性能吸尘器电机驱动器，要求：支持宽电压输入范围，具备过流保护功能，响应速度快，噪音低。',
-            '伺服电机驱动器': '设计一个高精度伺服电机驱动器，要求：支持位置环和速度环控制，具备良好的动态响应特性，支持编码器反馈。',
-            '电流环驱动器': '设计一个电流环驱动器，要求：具备高精度电流控制能力，支持快速电流响应，具有限流保护功能。'
+            'PID转速控制': '请设计基于PID的电机转速控制程序。',
+            'LADRC转速控制': '请设计基于LADRC的电机转速控制程序。',
+            '位置伺服控制': '请设计基于位置环的伺服控制系统。'
         }
         
         template_text = templates.get(template_type, '')
@@ -996,7 +993,7 @@ class MainProgramPanel(QWidget):
         if not state.get('program_generated'):
             return {
                 'action': ACTION_CLARIFY,
-                'reply': '请描述原始应用场景或控制目标，例如吸尘器驱动、伺服位置控制、电流环控制或调速驱动。',
+                'reply': '请描述原始应用场景或控制目标，例如PID转速控制、LADRC转速控制、位置伺服控制、电流环控制或调速驱动。',
                 'reason': '缺少可整理的程序需求',
             }
         if state.get('load_curve_saved') and not state.get('metrics_ready'):
@@ -1122,8 +1119,8 @@ class MainProgramPanel(QWidget):
 
     def _intent_alternative_label(self, action: str) -> str:
         if action == ACTION_REVISE_PROGRAM:
-            return '改为指标需求'
-        return '改为程序需求'
+            return '我要修改指标'
+        return '我要修改程序'
 
     def _intent_summary(self, action: str, text: str) -> str:
         cleaned = ' '.join((text or '').split())

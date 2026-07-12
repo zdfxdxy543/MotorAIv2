@@ -34,19 +34,11 @@ matplotlib.use("Qt5Agg")
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
+from styles.fonts import configure_matplotlib_fonts
 from styles.theme import current_theme
 
 # ── 中文字体配置 ──────────────────────────────────────────────────────
-import matplotlib.font_manager as fm
-
-_CHINESE_FONTS = [
-    "Microsoft YaHei", "SimHei", "Noto Sans CJK SC",
-    "WenQuanYi Micro Hei", "Arial Unicode MS", "sans-serif",
-]
-_available = {f.name for f in fm.fontManager.ttflist}
-_selected = next((fn for fn in _CHINESE_FONTS if fn in _available), "sans-serif")
-matplotlib.rcParams["font.family"] = _selected
-matplotlib.rcParams["axes.unicode_minus"] = False
+configure_matplotlib_fonts(matplotlib)
 
 # ── 候选方案配色 ──────────────────────────────────────────────────────
 CANDIDATE_COLORS: dict[str, str] = {
@@ -456,18 +448,17 @@ class ResultChartsPanel(QWidget):
 
         # 标题行：标题 + 轮次下拉框
         header = QHBoxLayout()
-        header.setContentsMargins(0, 0, 0, 0)
+        header.setContentsMargins(8, 4, 8, 4)
         header.setSpacing(8)
 
-        self._title_label = QLabel("📊 仿真结果图表")
+        self._title_label = QLabel("仿真结果图表")
         self._title_label.setObjectName("chartPanelTitle")
         self._title_label.setStyleSheet(
             f"QLabel#chartPanelTitle{{"
-            f"font-size:14px;font-weight:bold;padding:8px 12px;"
-            f"color:{current_theme().text};"
+            f"font-size:14px;font-weight:600;"
+            f"color:{current_theme().muted};"
             f"background:{current_theme().panel};border:none;}}"
         )
-        self._title_label.setFixedHeight(36)
         header.addWidget(self._title_label)
 
         header.addStretch()
@@ -530,7 +521,7 @@ class ResultChartsPanel(QWidget):
 
     def show_running(self, round_number: int = 1):
         """仿真正在运行中——显示占位提示，保留标题栏轮次信息。"""
-        self._title_label.setText(f"📊 仿真结果图表  —  Round {round_number}  ● 运行中")
+        self._title_label.setText(f"仿真结果图表  —  Round {round_number}  ● 运行中")
         msg = f"第 {round_number} 轮仿真正在运行..."
         for chart in [self.speed_chart, self.score_chart, self.param_chart, self.angle_chart]:
             chart.show_empty(msg)
@@ -610,9 +601,9 @@ class ResultChartsPanel(QWidget):
         # ── 更新标题 ─────────────────────────────────────────────────
         latest = _latest_round(project_root)
         if rn == latest:
-            self._title_label.setText(f"📊 仿真结果图表  —  Round {rn} (当前)")
+            self._title_label.setText(f"仿真结果图表  —  Round {rn} (当前)")
         else:
-            self._title_label.setText(f"📊 仿真结果图表  —  Round {rn} (历史)")
+            self._title_label.setText(f"仿真结果图表  —  Round {rn} (历史)")
 
         # ── 获取项目 JSON 路径 ───────────────────────────────────────
         getter = self._project_json_getter
