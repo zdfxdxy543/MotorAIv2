@@ -1,11 +1,24 @@
-from PyQt5.QtWidgets import QLabel, QPushButton, QTextEdit, QWidget, QHBoxLayout, QVBoxLayout
+from PyQt5.QtGui import QColor
+from PyQt5.QtWidgets import (
+    QAbstractItemView,
+    QFrame,
+    QHeaderView,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QScrollArea,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
 from PyQt5.QtCore import QFileSystemWatcher
 from PyQt5.QtCore import Qt
 import json
 from pathlib import Path
 
 from widgets.chat import TranslationWorker
-from styles.theme import current_theme
+from styles.theme import current_theme, ghost_button_qss
 
 
 class TuningResultPanel(QWidget):
@@ -17,7 +30,7 @@ class TuningResultPanel(QWidget):
         self._translated_summary = ''
         self._current_score = None
         self._current_summary_text = ''
-        self._competition_note_text = ''
+        self._competition_details_data = {}
         self._translation_worker = None
         self._pending_refresh = False
         self._last_source_path = ''
@@ -38,30 +51,135 @@ class TuningResultPanel(QWidget):
         title_row.setAttribute(Qt.WA_StyledBackground, True)
         title_row.setStyleSheet(f'background:{t.panel};border:none;')
         title_layout = QHBoxLayout(title_row)
-        title_layout.setContentsMargins(0, 0, 0, 0)
-        title_layout.addWidget(QLabel('调优结果'))
+        title_layout.setContentsMargins(8, 4, 8, 4)
+        title_label = QLabel('调优结果')
+        title_label.setStyleSheet(f'font-size:14px;font-weight:600;color:{t.muted};')
+        title_layout.addWidget(title_label)
         title_layout.addStretch()
         refresh_btn = QPushButton('刷新结果')
+        refresh_btn.setStyleSheet(ghost_button_qss(padding='4px 10px'))
         refresh_btn.clicked.connect(self.refresh_from_project)
         title_layout.addWidget(refresh_btn)
 
-        self.result_view = QTextEdit()
-        self.result_view.setReadOnly(True)
-        self.result_view.setPlaceholderText('等待生成 tuning_result.json ...')
-        self.result_view.setMinimumHeight(180)
-        self.result_view.setStyleSheet(
-            f'QTextEdit{{background:{t.panel};border:none;border-radius:0;padding:8px;color:{t.text};}}'
+        self.result_scroll = QScrollArea()
+        self.result_scroll.setWidgetResizable(True)
+        self.result_scroll.setFrameShape(QFrame.NoFrame)
+        self.result_scroll.setStyleSheet(
+            f'QScrollArea{{background:{t.panel};border:none;}}'
+            f'QScrollArea > QWidget > QWidget{{background:{t.panel};}}'
         )
 
+        result_body = QWidget()
+        result_body.setStyleSheet(f'background:{t.panel};border:none;')
+        result_layout = QVBoxLayout(result_body)
+        result_layout.setContentsMargins(8, 8, 8, 8)
+        result_layout.setSpacing(8)
+
+        self.score_card = QFrame()
+        self.score_card.setObjectName('scoreCard')
+        self.score_card.setStyleSheet(self._card_qss('scoreCard'))
+        score_layout = QHBoxLayout(self.score_card)
+        score_layout.setContentsMargins(12, 10, 12, 10)
+        score_text_layout = QVBoxLayout()
+        score_text_layout.setSpacing(2)
+        score_caption = QLabel('综合评分')
+        score_caption.setStyleSheet(f'font-size:12px;color:{t.muted};')
+        score_text_layout.addWidget(score_caption)
+        score_value_row = QHBoxLayout()
+        score_value_row.setSpacing(4)
+        self.score_label = QLabel('—')
+        self.score_label.setStyleSheet(f'font-size:28px;font-weight:700;color:{t.text_strong};')
+        score_value_row.addWidget(self.score_label)
+        score_unit = QLabel('/ 100')
+        score_unit.setStyleSheet(f'font-size:12px;color:{t.muted};padding-top:10px;')
+        score_value_row.addWidget(score_unit)
+        score_value_row.addStretch()
+        score_text_layout.addLayout(score_value_row)
+        score_layout.addLayout(score_text_layout, 1)
+        self.status_badge = QLabel('等待结果')
+        self.status_badge.setAlignment(Qt.AlignCenter)
+        score_layout.addWidget(self.status_badge, 0, Qt.AlignTop)
+        result_layout.addWidget(self.score_card)
+
+        self.summary_card = QFrame()
+        self.summary_card.setObjectName('summaryCard')
+        self.summary_card.setStyleSheet(self._card_qss('summaryCard'))
+        summary_layout = QVBoxLayout(self.summary_card)
+        summary_layout.setContentsMargins(12, 10, 12, 12)
+        summary_layout.setSpacing(8)
+        summary_title = QLabel('结果摘要')
+        summary_title.setStyleSheet(f'font-size:12px;font-weight:600;color:{t.text_strong};')
+        summary_layout.addWidget(summary_title)
+        self.summary_label = QLabel('等待生成调优结果…')
+        self.summary_label.setWordWrap(True)
+        self.summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.summary_label.setStyleSheet(f'font-size:13px;color:{t.text};line-height:1.6;')
+        summary_layout.addWidget(self.summary_label)
+        self.reason_title = QLabel('胜出原因')
+        self.reason_title.setStyleSheet(f'font-size:12px;font-weight:600;color:{t.muted};padding-top:4px;')
+        self.reason_label = QLabel()
+        self.reason_label.setWordWrap(True)
+        self.reason_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.reason_label.setStyleSheet(f'font-size:13px;color:{t.text};')
+        summary_layout.addWidget(self.reason_title)
+        summary_layout.addWidget(self.reason_label)
+        self.reason_title.hide()
+        self.reason_label.hide()
+        result_layout.addWidget(self.summary_card)
+
+        self.candidates_card = QFrame()
+        self.candidates_card.setObjectName('candidatesCard')
+        self.candidates_card.setStyleSheet(self._card_qss('candidatesCard'))
+        candidates_layout = QVBoxLayout(self.candidates_card)
+        candidates_layout.setContentsMargins(12, 10, 12, 12)
+        candidates_layout.setSpacing(8)
+        candidates_title = QLabel('候选方案')
+        candidates_title.setStyleSheet(f'font-size:12px;font-weight:600;color:{t.text_strong};')
+        candidates_layout.addWidget(candidates_title)
+        self.candidates_table = QTableWidget(0, 4)
+        self.candidates_table.setHorizontalHeaderLabels(('方案', '得分', '状态', '停止原因'))
+        self.candidates_table.verticalHeader().hide()
+        self.candidates_table.setShowGrid(False)
+        self.candidates_table.setAlternatingRowColors(True)
+        self.candidates_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.candidates_table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.candidates_table.setFocusPolicy(Qt.NoFocus)
+        self.candidates_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.candidates_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.candidates_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.candidates_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        self.candidates_table.setStyleSheet(
+            f'QTableWidget{{background:{t.surface};alternate-background-color:{t.panel};border:none;'
+            f'color:{t.text};font-size:12px;}}'
+            f'QHeaderView::section{{background:{t.panel};color:{t.muted};border:none;'
+            f'border-bottom:1px solid {t.border};padding:5px 6px;font-weight:600;}}'
+            f'QTableWidget::item{{border:none;padding:4px 6px;}}'
+        )
+        candidates_layout.addWidget(self.candidates_table)
+        self.candidates_card.hide()
+        result_layout.addWidget(self.candidates_card)
+        result_layout.addStretch()
+        self.result_scroll.setWidget(result_body)
+
         self.source_label = QLabel('来源：未加载项目')
-        self.source_label.setStyleSheet(f'color:{t.subtle};background:{t.panel};border:none;')
-        self.source_label.setWordWrap(True)
+        self.source_label.setStyleSheet(
+            f'font-size:11px;color:{t.subtle};background:{t.panel};border:none;padding:4px 8px 8px 8px;'
+        )
+        self.source_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
 
         layout.addWidget(title_row)
-        layout.addWidget(self.result_view, 1)
+        layout.addWidget(self.result_scroll, 1)
         layout.addWidget(self.source_label)
 
         self.refresh_from_project()
+
+    @staticmethod
+    def _card_qss(object_name):
+        t = current_theme()
+        return (
+            f'QFrame#{object_name}{{background:{t.surface};border:1px solid {t.border};border-radius:8px;}}'
+            f'QFrame#{object_name} QLabel{{background:transparent;border:none;}}'
+        )
 
     def _project_json_path(self):
         if callable(self.project_json_getter):
@@ -104,7 +222,7 @@ class TuningResultPanel(QWidget):
     @staticmethod
     def _format_score(value):
         if value is None:
-            return 'N/A'
+            return '—'
         if isinstance(value, float) and value.is_integer():
             return str(int(value))
         return str(value)
@@ -143,43 +261,17 @@ class TuningResultPanel(QWidget):
         return None
 
     @staticmethod
-    def _score_text(value):
-        return 'N/A' if value is None else str(value)
-
-    def _competition_note(self, competition_payload, selected_result_path: Path | None):
+    def _competition_details(competition_payload):
         if not isinstance(competition_payload, dict):
-            return ''
-
-        lines = ['competition summary']
-        winner_reason = str(competition_payload.get('winner_reason') or '').strip()
-        if winner_reason:
-            lines.append(f'winner_reason: {winner_reason}')
-        if 'requirement_satisfied' in competition_payload:
-            lines.append(f'requirement_satisfied: {competition_payload.get("requirement_satisfied")}')
-        mode = competition_payload.get('optimize_execution_mode')
-        if mode:
-            lines.append(f'optimize_execution_mode: {mode}')
-
+            return {}
         scoreboard = competition_payload.get('scoreboard')
-        if isinstance(scoreboard, list) and scoreboard:
-            lines.append('')
-            lines.append('scoreboard:')
-            for item in scoreboard:
-                if not isinstance(item, dict):
-                    continue
-                lines.append(
-                    '- {candidate}: score={score}, status={status}, stop={stop}'.format(
-                        candidate=item.get('candidate_id', ''),
-                        score=self._score_text(item.get('overall_score')),
-                        status=item.get('status', ''),
-                        stop=item.get('stop_reason', ''),
-                    )
-                )
-
-        if selected_result_path is not None:
-            lines.append('')
-            lines.append(f'showing_detail: {selected_result_path}')
-        return '\n'.join(lines).strip()
+        winner = competition_payload.get('winner')
+        return {
+            'winner_reason': str(competition_payload.get('winner_reason') or '').strip(),
+            'requirement_satisfied': competition_payload.get('requirement_satisfied'),
+            'scoreboard': [item for item in scoreboard if isinstance(item, dict)] if isinstance(scoreboard, list) else [],
+            'winner_id': str(winner.get('candidate_id') or '') if isinstance(winner, dict) else '',
+        }
 
     def _candidate_result_from_competition(self, competition_payload):
         if not isinstance(competition_payload, dict):
@@ -319,26 +411,123 @@ class TuningResultPanel(QWidget):
     def _on_watch_triggered(self, _path: str):
         self.refresh_from_project()
 
-    def _render(self, score_value, translated_summary, source_path_text, status_text=None, competition_note=''):
-        lines = [f'overall_score: {self._format_score(score_value)}']
-        note = (competition_note or '').strip()
-        if note:
-            lines.append('')
-            lines.append(note)
+    def _set_status_badge(self, text, kind='neutral'):
+        t = current_theme()
+        palettes = {
+            'success': (t.success_bg, t.success_border, t.success_text),
+            'error': (t.error_bg, t.error_border, t.error_text),
+            'neutral': (t.primary_soft, t.primary_border, t.primary_text),
+        }
+        background, border, color = palettes.get(kind, palettes['neutral'])
+        self.status_badge.setText(text)
+        self.status_badge.setStyleSheet(
+            f'font-size:11px;font-weight:600;color:{color};background:{background};'
+            f'border:1px solid {border};border-radius:9px;padding:3px 8px;'
+        )
+
+    @staticmethod
+    def _display_status(value):
+        text = str(value or '').strip()
+        aliases = {
+            'completed': '已完成',
+            'complete': '已完成',
+            'success': '成功',
+            'succeeded': '成功',
+            'failed': '失败',
+            'error': '异常',
+            'running': '运行中',
+            'pending': '等待中',
+            'skipped': '已跳过',
+            'stopped': '已停止',
+        }
+        return aliases.get(text.lower(), text or '—')
+
+    @staticmethod
+    def _display_stop_reason(value):
+        text = str(value or '').strip()
+        aliases = {
+            'requirement_satisfied': '已满足需求',
+            'max_iterations': '达到最大迭代次数',
+            'completed': '正常完成',
+            'failed': '运行失败',
+            'cancelled': '已取消',
+            'canceled': '已取消',
+            'timeout': '运行超时',
+        }
+        return aliases.get(text.lower(), text or '—')
+
+    def _populate_candidates(self, details):
+        scoreboard = details.get('scoreboard') if isinstance(details, dict) else []
+        scoreboard = scoreboard if isinstance(scoreboard, list) else []
+        self.candidates_table.setRowCount(len(scoreboard))
+        winner_id = str(details.get('winner_id') or '') if isinstance(details, dict) else ''
+        t = current_theme()
+        for row, item in enumerate(scoreboard):
+            candidate_id = str(item.get('candidate_id') or '—')
+            is_winner = bool(winner_id and candidate_id == winner_id)
+            values = (
+                f'{candidate_id}（最佳）' if is_winner else candidate_id,
+                self._format_score(item.get('overall_score')),
+                self._display_status(item.get('status')),
+                self._display_stop_reason(item.get('stop_reason')),
+            )
+            for column, value in enumerate(values):
+                cell = QTableWidgetItem(value)
+                cell.setTextAlignment(Qt.AlignCenter)
+                if is_winner:
+                    cell.setBackground(QColor(t.primary_soft))
+                    cell.setForeground(QColor(t.primary_text))
+                self.candidates_table.setItem(row, column, cell)
+            self.candidates_table.setRowHeight(row, 30)
+
+        if scoreboard:
+            table_height = self.candidates_table.horizontalHeader().height() + min(len(scoreboard), 4) * 30 + 2
+            self.candidates_table.setFixedHeight(table_height)
+            self.candidates_card.show()
+        else:
+            self.candidates_card.hide()
+
+    def _render(self, score_value, translated_summary, source_path_text, status_text=None, competition_details=None):
+        details = competition_details if isinstance(competition_details, dict) else {}
+        self.score_label.setText(self._format_score(score_value))
+
+        satisfied = details.get('requirement_satisfied')
+        normalized_status = str(status_text or '')
+        if '失败' in normalized_status or '异常' in normalized_status:
+            self._set_status_badge('处理异常', 'error')
+        elif satisfied is True:
+            self._set_status_badge('满足需求', 'success')
+        elif score_value is None:
+            self._set_status_badge('等待结果')
+        elif '正在翻译' in normalized_status:
+            self._set_status_badge('整理结果')
+        elif satisfied is False:
+            self._set_status_badge('继续调优')
+        else:
+            self._set_status_badge('调优完成', 'success')
+
         body = (translated_summary or '').strip()
         if body:
-            lines.append('')
-            lines.append(body)
+            self.summary_label.setText(body)
+        elif score_value is None:
+            self.summary_label.setText('运行调优后，这里将显示评分、结果摘要和候选方案对比。')
         else:
-            lines.append('')
-            lines.append('等待 setup_summary 翻译结果...')
-        self.result_view.setPlainText('\n'.join(lines))
+            self.summary_label.setText('正在整理调优结果…')
+        self.summary_card.setToolTip(normalized_status)
+
+        reason = str(details.get('winner_reason') or '').strip()
+        self.reason_label.setText(reason)
+        self.reason_title.setVisible(bool(reason))
+        self.reason_label.setVisible(bool(reason))
+        self._populate_candidates(details)
+
         if source_path_text:
-            self.source_label.setText(f'来源：{source_path_text}')
+            source_path = Path(source_path_text)
+            self.source_label.setText(f'来源：{source_path.name}')
+            self.source_label.setToolTip(str(source_path))
         else:
-            self.source_label.setText('来源：未找到 tuning_result.json')
-        if status_text:
-            self.result_view.setToolTip(status_text)
+            self.source_label.setText('来源：尚未生成 tuning_result.json')
+            self.source_label.setToolTip('')
 
     def _start_translation(self, summary_key: str, summary_text: str):
         if self._translation_worker is not None and self._translation_worker.isRunning():
@@ -355,14 +544,26 @@ class TuningResultPanel(QWidget):
         if summary_key != self._current_summary_key:
             return
         self._translated_summary = translated_text.strip()
-        self._render(self._current_score, self._translated_summary, self._last_source_path, '翻译完成', getattr(self, '_competition_note_text', ''))
+        self._render(
+            self._current_score,
+            self._translated_summary,
+            self._last_source_path,
+            '翻译完成',
+            self._competition_details_data,
+        )
 
     def _on_translation_failure(self, summary_key: str, error_text: str):
         if summary_key != self._current_summary_key:
             return
         fallback = self._current_summary_text or '翻译失败：' + error_text
         self._translated_summary = fallback
-        self._render(self._current_score, self._translated_summary, self._last_source_path, f'翻译失败：{error_text}', getattr(self, '_competition_note_text', ''))
+        self._render(
+            self._current_score,
+            self._translated_summary,
+            self._last_source_path,
+            f'翻译失败：{error_text}',
+            self._competition_details_data,
+        )
 
     def _on_translation_finished(self):
         self._translation_worker = None
@@ -373,8 +574,8 @@ class TuningResultPanel(QWidget):
     def refresh_from_project(self):
         self._sync_watch_paths()
         tuning_result_path, competition_payload = self._resolve_result_source()
-        competition_note = self._competition_note(competition_payload, tuning_result_path)
-        self._competition_note_text = competition_note
+        competition_details = self._competition_details(competition_payload)
+        self._competition_details_data = competition_details
         if not tuning_result_path or not tuning_result_path.exists():
             self._current_result_key = ''
             self._current_summary_key = ''
@@ -382,20 +583,21 @@ class TuningResultPanel(QWidget):
             self._current_score = None
             self._current_summary_text = ''
             self._last_source_path = ''
-            self._render(None, '', '', '未找到 tuning_result.json', competition_note)
+            self._render(None, '', '', '未找到 tuning_result.json', competition_details)
             return
 
         try:
             with open(tuning_result_path, 'r', encoding='utf-8') as f:
                 payload = json.load(f)
         except Exception as exc:
-            self._render(None, f'读取失败：{exc}', str(tuning_result_path), f'读取 tuning_result.json 失败：{exc}', competition_note)
+            self._render(None, f'读取失败：{exc}', str(tuning_result_path), f'读取 tuning_result.json 失败：{exc}', competition_details)
             return
 
         final_evaluation = payload.get('final_evaluation') or {}
         score_value = final_evaluation.get('overall_score')
         summary_text = self._result_summary_text(payload)
-        summary_key = f'{tuning_result_path}:{competition_note}:{summary_text}'
+        details_key = json.dumps(competition_details, ensure_ascii=False, sort_keys=True, default=str)
+        summary_key = f'{tuning_result_path}:{details_key}:{summary_text}'
         result_key = f'{tuning_result_path}:{score_value!r}:{summary_key}'
 
         self._last_source_path = str(tuning_result_path)
@@ -411,13 +613,13 @@ class TuningResultPanel(QWidget):
         if not summary_text:
             self._current_summary_key = ''
             self._translated_summary = ''
-            self._render(score_value, '', str(tuning_result_path), 'setup_summary 为空', competition_note)
+            self._render(score_value, '', str(tuning_result_path), '结果摘要为空', competition_details)
             return
 
         if summary_changed:
             self._current_summary_key = summary_key
             self._translated_summary = ''
-            self._render(score_value, '正在翻译 setup_summary...', str(tuning_result_path), '正在翻译 setup_summary', competition_note)
+            self._render(score_value, '正在整理结果摘要…', str(tuning_result_path), '正在翻译结果摘要', competition_details)
             self._start_translation(summary_key, summary_text)
         else:
-            self._render(score_value, self._translated_summary, str(tuning_result_path), 'overall_score 已刷新' if score_changed else None, competition_note)
+            self._render(score_value, self._translated_summary, str(tuning_result_path), '综合评分已刷新' if score_changed else None, competition_details)

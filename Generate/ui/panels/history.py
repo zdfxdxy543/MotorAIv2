@@ -17,8 +17,8 @@ from PyQt5.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QScrollArea,
     QSplitter,
-    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -144,17 +144,78 @@ class HistoryPanel(QWidget):
         list_header_layout = QHBoxLayout(list_header)
         list_header_layout.setContentsMargins(8, 4, 8, 4)
         title_label = QLabel("历史工程")  # 历史工程
-        title_label.setStyleSheet(f'font-size:12pt;font-weight:700;color:{t.text_strong};')
+        title_label.setStyleSheet(f'font-size:14px;font-weight:600;color:{t.muted};')
         list_header_layout.addWidget(title_label)
 
         # ── project info ──────────────────────────────────────────
-        self.info_view = QTextEdit()
-        self.info_view.setReadOnly(True)
-        self.info_view.setPlaceholderText("单击项目查看详情")  # 单击项目查看详情
-        self.info_view.setFrameShape(QFrame.NoFrame)
-        self.info_view.setStyleSheet(
-            f"QTextEdit{{background:{t.panel};border:none;color:{t.text};padding:8px;}}"
+        self.info_scroll = QScrollArea()
+        self.info_scroll.setWidgetResizable(True)
+        self.info_scroll.setFrameShape(QFrame.NoFrame)
+        self.info_scroll.setStyleSheet(
+            f'QScrollArea{{background:{t.panel};border:none;}}'
+            f'QScrollArea > QWidget > QWidget{{background:{t.panel};}}'
         )
+
+        info_body = QWidget()
+        info_body.setStyleSheet(f'background:{t.panel};border:none;')
+        info_body_layout = QVBoxLayout(info_body)
+        info_body_layout.setContentsMargins(8, 8, 8, 8)
+
+        self.info_empty_label = QLabel('单击历史工程查看详情')
+        self.info_empty_label.setAlignment(Qt.AlignCenter)
+        self.info_empty_label.setWordWrap(True)
+        self.info_empty_label.setStyleSheet(f'font-size:12px;color:{t.muted};padding:20px 8px;')
+        info_body_layout.addWidget(self.info_empty_label)
+
+        self.info_card = QFrame()
+        self.info_card.setObjectName('projectInfoCard')
+        self.info_card.setStyleSheet(
+            f'QFrame#projectInfoCard{{background:{t.surface};border:1px solid {t.border};border-radius:8px;}}'
+            f'QFrame#projectInfoCard QLabel{{background:transparent;border:none;}}'
+        )
+        card_layout = QVBoxLayout(self.info_card)
+        card_layout.setContentsMargins(12, 10, 12, 10)
+        card_layout.setSpacing(0)
+        self.info_value_labels = {}
+        fields = (
+            ('candidate_count', '候选方案数'),
+            ('max_iterations', '最大迭代'),
+            ('task_type', '任务类型'),
+            ('objective', '设计目标'),
+            ('design_profile', '设计方案'),
+            ('path', '项目位置'),
+        )
+        for index, (key, caption) in enumerate(fields):
+            row = QWidget()
+            row.setStyleSheet('background:transparent;border:none;')
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 8, 0, 8)
+            row_layout.setSpacing(10)
+
+            caption_label = QLabel(caption)
+            caption_label.setFixedWidth(68)
+            caption_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+            caption_label.setStyleSheet(f'font-size:12px;color:{t.muted};')
+            row_layout.addWidget(caption_label)
+
+            value_label = QLabel('—')
+            value_label.setWordWrap(True)
+            value_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            value_label.setStyleSheet(f'font-size:13px;font-weight:400;color:{t.text};')
+            row_layout.addWidget(value_label, 1)
+            self.info_value_labels[key] = value_label
+            card_layout.addWidget(row)
+
+            if index < len(fields) - 1:
+                divider = QFrame()
+                divider.setFrameShape(QFrame.HLine)
+                divider.setStyleSheet(f'background:{t.border};border:none;max-height:1px;')
+                card_layout.addWidget(divider)
+
+        self.info_card.hide()
+        info_body_layout.addWidget(self.info_card)
+        info_body_layout.addStretch()
+        self.info_scroll.setWidget(info_body)
 
         info_header = QWidget()
         info_header.setAttribute(Qt.WA_StyledBackground, True)
@@ -162,7 +223,7 @@ class HistoryPanel(QWidget):
         info_header_layout = QHBoxLayout(info_header)
         info_header_layout.setContentsMargins(8, 4, 8, 4)
         info_label = QLabel("项目信息")  # 项目信息
-        info_label.setStyleSheet(f'font-size:11pt;font-weight:600;color:{t.muted};')
+        info_label.setStyleSheet(f'font-size:14px;font-weight:600;color:{t.muted};')
         info_header_layout.addWidget(info_label)
 
         # ── splitter ──────────────────────────────────────────────
@@ -185,7 +246,7 @@ class HistoryPanel(QWidget):
         info_layout.setContentsMargins(0, 0, 0, 0)
         info_layout.setSpacing(0)
         info_layout.addWidget(info_header)
-        info_layout.addWidget(self.info_view)
+        info_layout.addWidget(self.info_scroll)
 
         splitter.addWidget(list_container)
         splitter.addWidget(info_container)
@@ -233,20 +294,27 @@ class HistoryPanel(QWidget):
         try:
             data = json.loads(json_path.read_text(encoding="utf-8-sig"))
         except Exception:
-            self.info_view.setPlainText("无法读取项目文件。")  # 无法读取项目文件。
+            self.info_card.hide()
+            self.info_empty_label.setText('无法读取项目文件')
+            self.info_empty_label.show()
             return
 
-        lines = [
-            f'路径：{json_path.parent}',               # 路径：
-            f'候选方案数：{data.get("candidate_count", "—")}',  # 候选方案数：
-            f'最大迭代：{data.get("max_iterations", "—")}',        # 最大迭代：
-            f'任务类型：{data.get("task_type") or "—"}',            # 任务类型：
-        ]
-        if isinstance(data.get("objective"), str) and data["objective"].strip():
-            lines.append(f'目标：{data["objective"].strip()}')  # 目标：
-        if isinstance(data.get("design_profile"), dict):
-            profile_name = data["design_profile"].get("name", "")
-            if profile_name:
-                lines.append(f'设计方案：{profile_name}')  # 设计方案：
+        objective = data.get('objective')
+        objective = objective.strip() if isinstance(objective, str) and objective.strip() else '—'
+        profile = data.get('design_profile')
+        profile_name = profile.get('name') if isinstance(profile, dict) else ''
+        values = {
+            'candidate_count': data.get('candidate_count', '—'),
+            'max_iterations': data.get('max_iterations', '—'),
+            'task_type': data.get('task_type') or '—',
+            'objective': objective,
+            'design_profile': profile_name or '—',
+            'path': str(json_path.parent),
+        }
+        for key, value in values.items():
+            text = str(value)
+            self.info_value_labels[key].setText(text)
+            self.info_value_labels[key].setToolTip(text if key == 'path' else '')
 
-        self.info_view.setPlainText("\n".join(lines))
+        self.info_empty_label.hide()
+        self.info_card.show()
