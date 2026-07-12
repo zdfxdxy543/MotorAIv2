@@ -61,6 +61,8 @@ _LADRC_TUNABLE: set[str] = {
     "INERTIA",
     "TORQUE_CONST",
     "SPEED_SLOPE_LIMIT",
+    "CUR_KP",
+    "CUR_KI",
 }
 
 # SMC signature parameter names.
@@ -73,6 +75,8 @@ _SMC_TUNABLE: set[str] = {
     "CUR_LIMIT",
     "INERTIA",
     "TORQUE_CONST",
+    "CUR_KP",
+    "CUR_KI",
 }
 
 

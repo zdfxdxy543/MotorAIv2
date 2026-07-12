@@ -8,6 +8,9 @@
 #define VEL_KP 5.0f
 #define VEL_KI 1.0f
 
+#define CUR_KP 1.0f
+#define CUR_KI 1200.0f
+
 #define SPEED_LIMIT 1.0f
 #define SPEED_SLOPE_LIMIT 1.0f
 #define CUR_LIMIT 0.3f
