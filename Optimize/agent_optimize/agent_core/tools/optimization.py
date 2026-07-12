@@ -58,8 +58,6 @@ _LADRC_TUNABLE: set[str] = {
     "TARGET_WC",
     "TARGET_WO",
     "CUR_LIMIT",
-    "INERTIA",
-    "TORQUE_CONST",
     "SPEED_SLOPE_LIMIT",
     "CUR_KP",
     "CUR_KI",
@@ -73,8 +71,6 @@ _SMC_TUNABLE: set[str] = {
     "TARGET_BW",
     "DIST_REJECT_TORQUE",
     "CUR_LIMIT",
-    "INERTIA",
-    "TORQUE_CONST",
     "CUR_KP",
     "CUR_KI",
 }

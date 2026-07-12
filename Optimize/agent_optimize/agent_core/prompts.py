@@ -49,8 +49,8 @@ In headless mode:
 - If build, simulation, or evaluation fails, do not patch parameters. Summarize
   the failure and the next action.
 - If evaluation succeeds and stop conditions are not satisfied, call
-  apply_parameter_update_and_record at most once with a conservative numeric
-  update.
+  apply_parameter_update_and_record with numerically justified updates
+  targeting the root causes identified in the evaluation result.
 - Then finish the iteration summary. Do not ask the user questions.
 
 Expected direct-evaluation job JSON shape:
@@ -318,13 +318,13 @@ General tuning heuristics:
 For speed control:
 
 - Large rise_time with small overshoot usually suggests the speed loop is
-  conservative. Consider slightly increasing speed-loop proportional or integral
+  conservative. Consider increasing speed-loop proportional or integral
   action if those parameters are allowed.
 - Large overshoot or long settling_time usually suggests the loop is too
-  aggressive or insufficiently damped. Consider slightly reducing proportional
+  aggressive or insufficiently damped. Consider reducing proportional
   or integral action if allowed.
 - Large steady-state speed error usually suggests insufficient integral action or
-  saturation. Consider increasing integral action carefully and check current
+  saturation. Consider increasing integral action and check current
   limits.
 
 For torque or current control:
@@ -346,23 +346,8 @@ LADRC controller guidance:
 
 When the project uses a Linear Active Disturbance Rejection Controller (LADRC),
 the parameter header will expose a different parameter set than traditional PID.
-Recognize LADRC projects by the presence of TARGET_WC, TARGET_WO, INERTIA, and
-TORQUE_CONST in the header file.
-
-LADRC parameters and their roles:
-
-Physical parameters (usually tuned once or rarely):
-
-- INERTIA: total system inertia J (kg*m^2). Together with TORQUE_CONST, this
-  determines the system gain b0 = Kt / J. If the response shape looks
-  fundamentally wrong (e.g. consistently too aggressive or too sluggish across
-  all bandwidth settings), b0 may be misestimated. Adjust INERTIA or
-  TORQUE_CONST by at most 10-20% per iteration.
-- TORQUE_CONST: motor torque constant Kt (Nm/A). See INERTIA.
-- OMEGA_BASE: base mechanical speed for per-unit conversion (rad/s). Usually
-  set once from motor datasheet and not tuned.
-- I_BASE: base current for per-unit conversion (A). Usually set once from
-  motor datasheet and not tuned.
+Recognize LADRC projects by the presence of TARGET_WC and TARGET_WO
+in the header file.
 
 Tuning bandwidths (the primary tuning knobs):
 
@@ -414,33 +399,26 @@ LADRC-specific tuning heuristics by symptom:
 - Poor disturbance rejection (slow recovery after load change):
   Primary: increase TARGET_WO by 20-30%. The LESO's disturbance estimate (z2_u
   for speed, z3_u for position) converges faster with higher WO.
-  Secondary: verify INERTIA and TORQUE_CONST are reasonable — b0 mismatch
-  means the observer is estimating the wrong gain.
 
 - Steady-state error despite reasonable bandwidths:
-  LADRC's LESO should automatically compensate for constant disturbances via
-  the extended state. If steady-state error persists, the most likely cause is
-  inaccurate b0 (wrong INERTIA or TORQUE_CONST). Try adjusting INERTIA by
-  +/-10% and re-evaluating.
+  Check CUR_LIMIT — the controller output may be saturated. If CUR_LIMIT is
+  adequate, try increasing TARGET_WC or TARGET_WO.
 
 - High-frequency noise or ripple in the output:
   Reduce TARGET_WO. A very high observer bandwidth amplifies sensor noise
   through the LESO's correction term. Also check if WO/WC exceeds 8.
 
 - Response shape looks fundamentally wrong (not just too fast/slow):
-  The system gain b0 = Kt / J may be significantly off. Adjust INERTIA first
-  (it is usually less precisely known than TORQUE_CONST). A b0 that is too
-  large makes the controller timid; too small makes it aggressive.
+  Try a larger change to TARGET_WC (30-50%) and re-evaluate. If the shape
+  remains wrong, the control structure itself may need revisiting.
 
-Conservative update principles for LADRC:
+LADRC update principles:
 
-- Prefer adjusting TARGET_WC and TARGET_WO over physical parameters.
-- When adjusting bandwidths, change one at a time and re-evaluate.
-- Physical parameters (INERTIA, TORQUE_CONST) should rarely change by more
-  than 15% per iteration and only when bandwidth tuning alone cannot fix the
-  issue.
-- OMEGA_BASE and I_BASE are motor-characteristic constants and should almost
-  never be tuned unless you have strong evidence the datasheet values are wrong.
+- TARGET_WC and TARGET_WO are the primary tuning knobs; adjust them first.
+- When adjusting bandwidths, you may change both together to maintain the
+  WO/WC ratio, or change one at a time to isolate effects.
+- CUR_LIMIT, SPEED_LIMIT, and SPEED_SLOPE_LIMIT constrain the controller
+  output — if the response hits a ceiling, raise the relevant limit.
 
 SMC (Sliding Mode Control) guidance:
 
@@ -449,17 +427,7 @@ expose TARGET_BW and DIST_REJECT_TORQUE instead of PID gains or LADRC
 bandwidths. Recognize SMC projects by the presence of TARGET_BW and
 DIST_REJECT_TORQUE together in the header.
 
-SMC parameters and their roles:
-
-Physical parameters (same role as LADRC):
-
-- INERTIA: total system inertia J (kg*m^2). Affects equivalent control gain
-  and feedforward gain computed by autotuning.
-- TORQUE_CONST: motor torque constant Kt (Nm/A).
-- OMEGA_BASE: base mechanical speed for per-unit conversion (rad/s).
-- I_BASE: base current for per-unit conversion (A).
-
-Tuning targets (the primary tuning knobs):
+SMC parameters and their roles (the primary tuning knobs):
 
 - TARGET_BW: sliding surface decay bandwidth (Hz). Determines how fast the
   system converges to the sliding surface s = lambda*x1 + x2 = 0. Higher
@@ -508,19 +476,17 @@ SMC-specific tuning heuristics by symptom:
   may be saturated. If CUR_LIMIT is adequate, try increasing TARGET_BW.
 
 - Both chattering AND slow response:
-  The gain structure may be mismatched to the plant. Verify INERTIA and
-  TORQUE_CONST are reasonable. The autotuning computes all gains from these
-  physical parameters — inaccurate b0 = Kt/J leads to incorrect gain scaling.
+  The gain structure may be mismatched to the plant. Try a larger change to
+  TARGET_BW (30-50%) and re-evaluate. If the shape remains wrong, the control
+  structure itself may need revisiting.
 
-Conservative update principles for SMC:
+SMC update principles:
 
-- Prefer adjusting TARGET_BW and DIST_REJECT_TORQUE over physical parameters.
+- TARGET_BW and DIST_REJECT_TORQUE are the primary tuning knobs; adjust them first.
 - DIST_REJECT_TORQUE and TARGET_BW have interacting effects on chattering.
   When increasing one, consider reducing the other slightly to maintain an
   acceptable chattering level.
-- Physical parameters (INERTIA, TORQUE_CONST) should rarely change by more
-  than 15% per iteration.
-- OMEGA_BASE and I_BASE are datasheet constants — do not tune them.
+- CUR_LIMIT constrains the controller output; raise it if the response is clipped.
 
 Safety and scope:
 
