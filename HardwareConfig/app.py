@@ -1,22 +1,21 @@
 """
 HardwareConfig main window.
 
-Assembles the preset list (left) and parameter editor (right)
-into a split-pane layout. Provides toolbar actions for settings
-and generating Motor_Model.h output.
+Tab-switchable editor: 电机参数 / 驱动板参数.
+Each tab has its own preset list (left) and parameter table (right).
 """
 
 import os
 import json
 from typing import Optional
 
-from PyQt5.QtCore import Qt, QSettings
+from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QMainWindow,
     QWidget,
-    QHBoxLayout,
     QVBoxLayout,
     QSplitter,
+    QStackedWidget,
     QMenuBar,
     QAction,
     QFileDialog,
@@ -27,16 +26,23 @@ from PyQt5.QtWidgets import (
     QLineEdit,
     QToolBar,
     QSizePolicy,
+    QButtonGroup,
+    QHBoxLayout,
     QApplication,
 )
 
 from ui.styles import app_stylesheet
 from ui.preset_list import PresetListPanel
 from ui.param_editor import ParamEditorPanel
+from ui.board_editor import BoardEditorPanel
 from core.parser import parse_motor_header
-from core.generator import generate_motor_model
+from core.board_parser import parse_board_header
+from core.generator import generate_motor_model, generate_board_model
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
+
+TAB_MOTOR = 0
+TAB_BOARD = 1
 
 
 def _load_config() -> dict:
@@ -58,13 +64,14 @@ def _save_config(cfg: dict):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("MotorAI — 电机硬件配置")
+        self.setWindowTitle("MotorAI — 硬件配置")
         self.setMinimumSize(1100, 700)
         self.resize(1280, 800)
 
         self._gmp_root: str = ""
-        self._output_path: str = ""
-        self._current_params: dict[str, Optional[float]] = {}
+        self._output_path_motor: str = ""
+        self._output_path_board: str = ""
+        self._current_tab: int = TAB_MOTOR
 
         self._build_menu()
         self._build_toolbar()
@@ -72,32 +79,28 @@ class MainWindow(QMainWindow):
         self._build_statusbar()
         self._apply_style()
 
-        # Restore saved config
         cfg = _load_config()
         gmp_root = cfg.get("gmp_root", "")
         if gmp_root and os.path.isdir(gmp_root):
             self._gmp_root = gmp_root
-            self._preset_list.set_gmp_root(gmp_root)
+            self._on_gmp_root_ready()
         else:
             self._prompt_gmp_root()
 
-        self._output_path = cfg.get("output_dir", "")
+        self._output_path_motor = cfg.get("output_dir_motor", "")
+        self._output_path_board = cfg.get("output_dir_board", "")
 
     # ------------------------------------------------------------------
-    # UI Construction
+    # UI
     # ------------------------------------------------------------------
 
     def _build_menu(self):
         mb = self.menuBar()
-
         file_menu = mb.addMenu("文件(&F)")
-
         set_gmp = QAction("设置 GMP 根目录...", self)
         set_gmp.triggered.connect(self._prompt_gmp_root)
         file_menu.addAction(set_gmp)
-
         file_menu.addSeparator()
-
         quit_action = QAction("退出(&Q)", self)
         quit_action.setShortcut("Ctrl+Q")
         quit_action.triggered.connect(self.close)
@@ -108,22 +111,17 @@ class MainWindow(QMainWindow):
         tb.setMovable(False)
         self.addToolBar(Qt.TopToolBarArea, tb)
 
-        # Spacer
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         tb.addWidget(spacer)
 
-        # Output path display + browse
-        path_label = QLabel("输出路径:")
-        tb.addWidget(path_label)
+        tb.addWidget(QLabel("输出路径:"))
 
         self._output_edit = QLineEdit()
-        self._output_edit.setPlaceholderText("选择 Motor_Model.h 输出位置...")
+        self._output_edit.setPlaceholderText("选择输出位置...")
         self._output_edit.setMinimumWidth(320)
         self._output_edit.setMaximumWidth(500)
         self._output_edit.setObjectName("searchBox")
-        if self._output_path:
-            self._output_edit.setText(self._output_path)
         tb.addWidget(self._output_edit)
 
         browse_btn = QPushButton("浏览")
@@ -133,48 +131,99 @@ class MainWindow(QMainWindow):
 
         tb.addSeparator()
 
-        generate_btn = QPushButton("生成 Motor_Model.h")
-        generate_btn.setObjectName("primaryButton")
-        generate_btn.clicked.connect(self._generate)
-        tb.addWidget(generate_btn)
+        self._generate_btn = QPushButton("生成 Motor_Model.h")
+        self._generate_btn.setObjectName("primaryButton")
+        self._generate_btn.clicked.connect(self._generate)
+        tb.addWidget(self._generate_btn)
 
     def _build_central(self):
         central = QWidget()
         self.setCentralWidget(central)
-        root_layout = QVBoxLayout(central)
-        root_layout.setContentsMargins(12, 8, 12, 8)
-        root_layout.setSpacing(0)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(12, 8, 12, 8)
+        root.setSpacing(8)
 
+        # ---- Tab buttons ----
+        tab_row = QHBoxLayout()
+        tab_row.setContentsMargins(0, 0, 0, 0)
+        tab_row.setSpacing(0)
+
+        self._tab_group = QButtonGroup(self)
+        self._tab_group.setExclusive(True)
+
+        self._btn_motor = QPushButton("电机参数")
+        self._btn_motor.setCheckable(True)
+        self._btn_motor.setChecked(True)
+        self._btn_motor.setObjectName("tabButton")
+        self._btn_motor.clicked.connect(lambda: self._switch_tab(TAB_MOTOR))
+        self._tab_group.addButton(self._btn_motor, TAB_MOTOR)
+
+        self._btn_board = QPushButton("驱动板参数")
+        self._btn_board.setCheckable(True)
+        self._btn_board.setObjectName("tabButton")
+        self._btn_board.clicked.connect(lambda: self._switch_tab(TAB_BOARD))
+        self._tab_group.addButton(self._btn_board, TAB_BOARD)
+
+        tab_row.addWidget(self._btn_motor)
+        tab_row.addWidget(self._btn_board)
+        tab_row.addStretch()
+        root.addLayout(tab_row)
+
+        # ---- Splitter with stacked panels ----
         splitter = QSplitter(Qt.Horizontal)
         splitter.setHandleWidth(1)
 
-        # Left: preset list
-        self._preset_list = PresetListPanel()
-        self._preset_list.preset_selected.connect(self._on_preset_selected)
-        splitter.addWidget(self._preset_list)
+        # Left stack: preset lists
+        self._left_stack = QStackedWidget()
+        self._motor_presets = PresetListPanel()
+        self._motor_presets.preset_selected.connect(self._on_motor_preset)
+        self._board_presets = PresetListPanel()
+        self._board_presets.preset_selected.connect(self._on_board_preset)
+        self._left_stack.addWidget(self._motor_presets)
+        self._left_stack.addWidget(self._board_presets)
+        splitter.addWidget(self._left_stack)
 
-        # Right: parameter editor
-        self._param_editor = ParamEditorPanel()
-        self._param_editor.param_changed.connect(self._on_param_changed)
-        splitter.addWidget(self._param_editor)
+        # Right stack: editors
+        self._right_stack = QStackedWidget()
+        self._motor_editor = ParamEditorPanel()
+        self._motor_editor.param_changed.connect(self._on_motor_param)
+        self._board_editor = BoardEditorPanel()
+        self._board_editor.param_changed.connect(self._on_board_param)
+        self._right_stack.addWidget(self._motor_editor)
+        self._right_stack.addWidget(self._board_editor)
+        splitter.addWidget(self._right_stack)
 
-        # Ratio: ~1:3
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 3)
         splitter.setSizes([280, 900])
-
-        root_layout.addWidget(splitter)
+        root.addWidget(splitter)
 
     def _build_statusbar(self):
         self._status = QStatusBar()
         self.setStatusBar(self._status)
-        self._status.showMessage("请选择预设电机，或设置 GMP 根目录。")
+        self._status.showMessage("请选择预设，或设置 GMP 根目录。")
 
     def _apply_style(self):
         self.setStyleSheet(app_stylesheet())
 
     # ------------------------------------------------------------------
-    # Slots — GMP root
+    # Tab switching
+    # ------------------------------------------------------------------
+
+    def _switch_tab(self, tab: int):
+        self._current_tab = tab
+        self._left_stack.setCurrentIndex(tab)
+        self._right_stack.setCurrentIndex(tab)
+
+        if tab == TAB_MOTOR:
+            self._generate_btn.setText("生成 Motor_Model.h")
+            self._output_edit.setText(self._output_path_motor)
+        else:
+            self._generate_btn.setText("生成 Driver_Board.h")
+            self._output_edit.setText(self._output_path_board)
+
+    # ------------------------------------------------------------------
+    # GMP root
     # ------------------------------------------------------------------
 
     def _prompt_gmp_root(self):
@@ -183,101 +232,132 @@ class MainWindow(QMainWindow):
         )
         if path:
             self._gmp_root = path
-            self._preset_list.set_gmp_root(path)
+            self._on_gmp_root_ready()
             cfg = _load_config()
             cfg["gmp_root"] = path
             _save_config(cfg)
             self._status.showMessage(f"GMP 根目录: {path}")
 
+    def _on_gmp_root_ready(self):
+        """Notify both preset lists of the GMP root."""
+        self._motor_presets.set_gmp_root(self._gmp_root)
+        # Board presets: scan inverter_3ph directory + extra standalone files
+        board_dir = os.path.join(
+            self._gmp_root, "ctl", "component", "hardware_preset", "inverter_3ph"
+        )
+        self._board_presets.set_preset_dir(board_dir)
+        # Add MONKEY_BOARD.h from GMP root (and ctl/ as fallback)
+        for extra in [
+            os.path.join(self._gmp_root, "MONKEY_BOARD.h"),
+            os.path.join(self._gmp_root, "ctl", "MONKEY_BOARD.h"),
+        ]:
+            if os.path.isfile(extra):
+                self._board_presets.add_extra_preset(extra)
+
     # ------------------------------------------------------------------
-    # Slots — Output path
+    # Output path
     # ------------------------------------------------------------------
 
     def _browse_output(self):
-        default_dir = os.path.dirname(self._output_path) if self._output_path else ""
-        if not default_dir or not os.path.isdir(default_dir):
-            default_dir = self._gmp_root or os.getcwd()
+        if self._current_tab == TAB_MOTOR:
+            default = self._output_path_motor or os.path.join(self._gmp_root or os.getcwd(), "Motor_Model.h")
+            title = "保存 Motor_Model.h"
+        else:
+            default = self._output_path_board or os.path.join(self._gmp_root or os.getcwd(), "Driver_Board.h")
+            title = "保存 Driver_Board.h"
 
         path, _ = QFileDialog.getSaveFileName(
-            self,
-            "保存 Motor_Model.h",
-            os.path.join(default_dir, "Motor_Model.h"),
-            "Header files (*.h);;All files (*)",
+            self, title, default, "Header files (*.h);;All files (*)"
         )
         if path:
-            self._output_path = path
+            if self._current_tab == TAB_MOTOR:
+                self._output_path_motor = path
+            else:
+                self._output_path_board = path
             self._output_edit.setText(path)
-            cfg = _load_config()
-            cfg["output_dir"] = path
-            _save_config(cfg)
 
     # ------------------------------------------------------------------
-    # Slots — Preset selection
+    # Preset selection
     # ------------------------------------------------------------------
 
-    def _on_preset_selected(self, filepath: str, params: dict):
-        """Load a preset into the editor."""
-        self._current_params = dict(params)
-        self._param_editor.load_params(params, flux_locked=True)
+    def _on_motor_preset(self, filepath: str, params: dict):
+        self._motor_editor.load_params(params)
         name = os.path.splitext(os.path.basename(filepath))[0]
-        self._status.showMessage(f"已加载预设: {name}")
+        self._status.showMessage(f"已加载电机预设: {name}")
+
+    def _on_board_preset(self, filepath: str, params: dict):
+        self._board_editor.load_params(params)
+        name = os.path.splitext(os.path.basename(filepath))[0]
+        self._status.showMessage(f"已加载驱动板预设: {name}")
 
     # ------------------------------------------------------------------
-    # Slots — Parameter changes
+    # Param changes
     # ------------------------------------------------------------------
 
-    def _on_param_changed(self, macro: str, value: Optional[float]):
-        """Track edits and trigger FLUX recalculation if needed."""
-        self._current_params[macro] = value
+    def _on_motor_param(self, macro: str, value):
+        pass
 
-        # When KV or POLE_PAIRS change, update FLUX if locked
-        if macro in ("MOTOR_PARAM_KV", "MOTOR_PARAM_POLE_PAIRS"):
-            self._param_editor.on_kv_or_pole_pairs_changed()
+    def _on_board_param(self, macro: str, value):
+        pass
 
     # ------------------------------------------------------------------
-    # Slots — Generate
+    # Generate
     # ------------------------------------------------------------------
 
     def _generate(self):
-        """Generate Motor_Model.h from current parameters."""
-        # Ensure we have an output path
-        if not self._output_path:
+        if self._current_tab == TAB_MOTOR:
+            self._generate_motor()
+        else:
+            self._generate_board()
+
+    def _generate_motor(self):
+        output = self._output_path_motor
+        if not output:
             self._browse_output()
-            if not self._output_path:
+            output = self._output_path_motor
+            if not output:
                 return
 
-        # Collect current params
-        params = self._param_editor.get_all_params()
-        flux_locked = self._param_editor.is_flux_locked()
-        preset_name = self._preset_list.current_preset_name() or ""
+        params = self._motor_editor.get_all_params()
+        preset = self._motor_presets.current_preset_name() or ""
 
         try:
-            generate_motor_model(
-                params,
-                self._output_path,
-                preset_name=preset_name,
-                flux_locked=flux_locked,
-            )
-            QMessageBox.information(
-                self,
-                "生成完成",
-                f"Motor_Model.h 已保存至:\n{self._output_path}",
-            )
-            self._status.showMessage(f"已生成: {self._output_path}")
+            generate_motor_model(params, output, preset_name=preset)
+            QMessageBox.information(self, "生成完成", f"Motor_Model.h 已保存至:\n{output}")
+            self._status.showMessage(f"已生成: {output}")
+            cfg = _load_config()
+            cfg["output_dir_motor"] = output
+            _save_config(cfg)
         except Exception as e:
-            QMessageBox.critical(
-                self,
-                "生成失败",
-                f"无法写入文件:\n{e}",
-            )
+            QMessageBox.critical(self, "生成失败", f"无法写入文件:\n{e}")
 
-    # ------------------------------------------------------------------
-    # Overrides
+    def _generate_board(self):
+        output = self._output_path_board
+        if not output:
+            self._browse_output()
+            output = self._output_path_board
+            if not output:
+                return
+
+        params = self._board_editor.get_all_params()
+        preset = self._board_presets.current_preset_name() or ""
+
+        try:
+            generate_board_model(params, output, preset_name=preset)
+            QMessageBox.information(self, "生成完成", f"Driver_Board.h 已保存至:\n{output}")
+            self._status.showMessage(f"已生成: {output}")
+            cfg = _load_config()
+            cfg["output_dir_board"] = output
+            _save_config(cfg)
+        except Exception as e:
+            QMessageBox.critical(self, "生成失败", f"无法写入文件:\n{e}")
+
     # ------------------------------------------------------------------
 
     def closeEvent(self, event):
         cfg = _load_config()
         cfg["gmp_root"] = self._gmp_root
-        cfg["output_dir"] = self._output_path
+        cfg["output_dir_motor"] = self._output_path_motor
+        cfg["output_dir_board"] = self._output_path_board
         _save_config(cfg)
         super().closeEvent(event)

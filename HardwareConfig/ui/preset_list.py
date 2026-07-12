@@ -32,15 +32,19 @@ class PresetListItem:
 
 
 class PresetListPanel(QWidget):
-    """Left sidebar panel showing available motor presets."""
+    """Left sidebar panel showing available presets."""
 
     preset_selected = pyqtSignal(str, dict)  # filepath, parsed_params
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, title: str = "预设电机", search_placeholder: str = "搜索型号..."):
         super().__init__(parent)
         self._presets: list[PresetListItem] = []
         self._parsed_cache: dict[str, dict] = {}  # filepath → params
         self._gmp_root: str = ""
+        self._title_text = title
+        self._search_placeholder = search_placeholder
+        self._parser_fn = None  # set by set_gmp_root / set_preset_dir
+        self._brief_fn = None  # set by set_gmp_root / set_preset_dir
         self._build_ui()
 
     # ------------------------------------------------------------------
@@ -53,14 +57,14 @@ class PresetListPanel(QWidget):
         layout.setSpacing(8)
 
         # Title
-        title = QLabel("预设电机")
+        title = QLabel(self._title_text)
         title.setObjectName("sectionHeader")
         layout.addWidget(title)
 
         # Search box
         self._search = QLineEdit()
         self._search.setObjectName("searchBox")
-        self._search.setPlaceholderText("搜索电机型号...")
+        self._search.setPlaceholderText(self._search_placeholder)
         self._search.setClearButtonEnabled(True)
         self._search.textChanged.connect(self._on_search_changed)
         layout.addWidget(self._search)
@@ -83,10 +87,40 @@ class PresetListPanel(QWidget):
     # ------------------------------------------------------------------
 
     def set_gmp_root(self, path: str):
-        """Set GMP root and reload the preset list."""
+        """Set GMP root and reload the preset list (motor presets)."""
+        from core.parser import parse_motor_header, extract_brief_info
         self._gmp_root = path
+        self._parser_fn = parse_motor_header
+        self._brief_fn = extract_brief_info
         self._parsed_cache.clear()
-        self._load_presets()
+        preset_dir = os.path.join(
+            path, "ctl", "component", "hardware_preset", "pmsm_motor"
+        )
+        self._load_presets(preset_dir)
+
+    def set_preset_dir(self, path: str):
+        """Set a custom preset directory and reload (board presets)."""
+        from core.board_parser import parse_board_header, extract_board_brief
+        self._parser_fn = parse_board_header
+        self._brief_fn = extract_board_brief
+        self._parsed_cache.clear()
+        self._load_presets(path)
+
+    def add_extra_preset(self, filepath: str):
+        """Append a single file to the preset list (e.g. MONKEY_BOARD.h)."""
+        if not os.path.isfile(filepath):
+            return
+        name = extract_preset_name(filepath)
+        try:
+            params = self._parser_fn(filepath) if self._parser_fn else {}
+        except Exception:
+            params = {}
+        self._parsed_cache[filepath] = params
+        brief = self._brief_fn(params) if self._brief_fn else ""
+        self._presets.append(PresetListItem(name, filepath, brief))
+        self._populate_list(self._presets)
+        cnt = len(self._presets)
+        self._status.setText(f"共 {cnt} 个预设")
 
     def current_preset_name(self) -> Optional[str]:
         """Return the name of the currently selected preset, if any."""
@@ -102,17 +136,11 @@ class PresetListPanel(QWidget):
     # Internals
     # ------------------------------------------------------------------
 
-    def _preset_dir(self) -> str:
-        return os.path.join(
-            self._gmp_root, "ctl", "component", "hardware_preset", "pmsm_motor"
-        )
-
-    def _load_presets(self):
+    def _load_presets(self, preset_dir: str):
         """Scan the preset directory and populate the list."""
         self._presets.clear()
         self._list.clear()
 
-        preset_dir = self._preset_dir()
         if not os.path.isdir(preset_dir):
             self._status.setText(f"未找到预设目录:\n{preset_dir}\n\n请在菜单栏设置 GMP 根目录。")
             return
@@ -133,9 +161,13 @@ class PresetListPanel(QWidget):
             filepath = os.path.join(preset_dir, h)
             name = extract_preset_name(filepath)
             try:
-                params = parse_motor_header(filepath)
+                if self._parser_fn:
+                    params = self._parser_fn(filepath)
+                else:
+                    from core.parser import parse_motor_header
+                    params = parse_motor_header(filepath)
                 self._parsed_cache[filepath] = params
-                brief = extract_brief_info(params)
+                brief = self._brief_fn(params) if self._brief_fn else ""
             except Exception:
                 brief = ""
                 self._parsed_cache[filepath] = {}

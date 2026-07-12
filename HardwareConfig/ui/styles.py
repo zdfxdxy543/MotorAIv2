@@ -159,6 +159,50 @@ def app_stylesheet() -> str:
         color: {COLOR_TEXT_SECONDARY};
     }}
 
+    /* ===== Tab buttons ===== */
+    QPushButton#tabButton {{
+        background: transparent;
+        color: {COLOR_TEXT_SECONDARY};
+        border: none;
+        border-bottom: 2px solid transparent;
+        border-radius: 0;
+        padding: 8px 20px;
+        font-size: {FONT_SIZE_BASE};
+        font-weight: 500;
+    }}
+    QPushButton#tabButton:hover {{
+        color: {COLOR_TEXT};
+        background: {COLOR_ACCENT_BG};
+    }}
+    QPushButton#tabButton:checked {{
+        color: {COLOR_PRIMARY};
+        border-bottom: 2px solid {COLOR_PRIMARY};
+        font-weight: 600;
+    }}
+
+    /* ===== Table ===== */
+    QTableWidget {{
+        background: {COLOR_SURFACE};
+        border: 1px solid {COLOR_BORDER};
+        border-radius: {RADIUS_SMALL}px;
+        gridline-color: #e8eaed;
+        outline: none;
+        alternate-background-color: #f8f9fb;
+    }}
+    QTableWidget::item {{
+        padding: 5px 10px;
+    }}
+    QHeaderView::section {{
+        background: #f0f1f4;
+        color: {COLOR_TEXT};
+        font-size: {FONT_SIZE_BASE};
+        font-weight: 600;
+        border: none;
+        border-right: 1px solid #e2e4e9;
+        border-bottom: 1px solid {COLOR_BORDER};
+        padding: 7px 10px;
+    }}
+
     /* ===== Buttons ===== */
     QPushButton#primaryButton {{
         background: {COLOR_PRIMARY};

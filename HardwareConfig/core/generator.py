@@ -1,52 +1,46 @@
 """
 Generate Motor_Model.h from the user-configured motor parameters.
 
-Only parameters with non-None values are emitted.
-Auto-calc parameters are written using the formula macro.
+Uses HardwareConfig/templates/Motor_Model_template.h as a blueprint.
+Only the #define MOTOR_PARAM_XXX values are replaced; all comments,
+structure, includes, and header guards are preserved verbatim.
 """
 
 import os
+import re
 from datetime import datetime
 from typing import Optional
 
-from .model import (
-    MotorParamDef,
-    PARAM_DEFS,
-    PARAMS_BY_CATEGORY,
-    CATEGORY_ORDER,
-    ParamCategory,
+from .model import PARAM_DEFS
+
+_TEMPLATE = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)),
+    "templates",
+    "Motor_Model_template.h",
+)
+
+# Matches a #define MOTOR_PARAM_XXX line (single- or multi-line after
+# continuation joining).  Captures: (1) macro name, (2) old value body,
+# (3) optional trailing  ///< comment.
+_RE_DEFINE = re.compile(
+    r'^(\s*#define\s+MOTOR_PARAM_\w+\s+)\(\(.+?\)\)(\s*///<.*)?$',
+    re.MULTILINE,
 )
 
 
-def _format_value(param: MotorParamDef, value: Optional[float], flux_locked: bool) -> str:
-    """Format a single #define line for one parameter."""
-    macro = param.macro
+def _format_float(value: float, decimals: int) -> str:
+    """Format a float to look like the original presets."""
+    if decimals == 0:
+        return str(int(value))
+    s = f"{value:.{decimals}f}".rstrip("0")
+    if s.endswith("."):
+        s += "0"
+    return s + "f"
 
-    # Flux with auto-calc locked → always use formula macro
-    if param.auto_calc and flux_locked and macro == "MOTOR_PARAM_FLUX":
-        return (
-            f"#define {macro} "
-            f"((MOTOR_PARAM_CALCULATE_FLUX_BY_KV(\\\n"
-            f"        MOTOR_PARAM_KV, MOTOR_PARAM_POLE_PAIRS)))"
-        )
 
-    if value is None:
-        # Not filled in – skip with a comment
-        return f"// #define {macro}  /* 未填写 */"
-
-    # Format the numeric value
-    if param.decimals == 0:
-        formatted = str(int(value))
-    else:
-        formatted = f"{value:.{param.decimals}f}"
-        # Strip trailing zeros but always keep at least ".0"
-        if "." in formatted:
-            formatted = formatted.rstrip("0")
-            if formatted.endswith("."):
-                formatted += "0"
-        formatted += "f"
-
-    return f"#define {macro} (({formatted}))"
+def _format_define(param, value: float) -> str:
+    """Build the replacement `#define MACRO ((...))` string."""
+    return f"#define {param.macro} (({_format_float(value, param.decimals)}))"
 
 
 def generate_motor_model(
@@ -54,10 +48,9 @@ def generate_motor_model(
     output_path: str,
     *,
     preset_name: str = "",
-    flux_locked: bool = True,
 ) -> str:
     """
-    Generate Motor_Model.h content and write to output_path.
+    Generate Motor_Model.h from the template, replacing macro values.
 
     Parameters
     ----------
@@ -67,57 +60,251 @@ def generate_motor_model(
         Destination file path.
     preset_name : str
         Name of the source preset (for the header comment).
-    flux_locked : bool
-        Whether FLUX is auto-calculated from KV.
 
     Returns
     -------
     str
         The generated file content.
     """
-    lines: list[str] = []
-    indent = "    "
+    if not os.path.isfile(_TEMPLATE):
+        raise FileNotFoundError(f"Template not found: {_TEMPLATE}")
 
-    # -- Header --
-    lines.append("/**")
-    lines.append(f" * @file Motor_Model.h")
-    lines.append(f" * @brief User-configured motor parameters.")
+    with open(_TEMPLATE, "r", encoding="utf-8", errors="replace") as fh:
+        content = fh.read()
+
+    # Join backslash-continuation lines so each #define occupies one logical line.
+    content = re.sub(r'\\\s*\n\s*', ' ', content)
+
+    # Build a quick lookup: macro → formatted replacement string or None
+    replacements: dict[str, Optional[str]] = {}
+    for p in PARAM_DEFS:
+        val = params.get(p.macro)
+        if val is not None:
+            replacements[p.macro] = _format_define(p, val)
+        else:
+            replacements[p.macro] = None
+
+    def _replace_match(m: re.Match) -> str:
+        macro = m.group(1).strip().split()[-1]  # extract macro name from the prefix
+        trailing = m.group(2) or ""
+
+        repl = replacements.get(macro)
+        if repl is not None:
+            return repl + trailing
+        else:
+            # Comment out the original define
+            return "// " + m.group(0).lstrip()
+
+    # Second pass: extract macro name from the matched prefix more robustly
+    def _replace_match_v2(m: re.Match) -> str:
+        prefix = m.group(1)          # e.g. "#define MOTOR_PARAM_RS "
+        trailing = m.group(2) or ""   # e.g. "     ///< Stator resistance..."
+
+        # Pull the macro name from the prefix
+        macro = prefix.strip().split()[1]  # "#define" "MOTOR_PARAM_XXX" ...
+
+        repl = replacements.get(macro)
+        if repl is not None:
+            return repl + trailing
+        else:
+            return "// " + m.group(0).lstrip()
+
+    content = _RE_DEFINE.sub(_replace_match_v2, content)
+
+    # Replace the @file / @brief comments
+    content = content.replace(
+        "@file SM060R20B30MNAD.h",
+        "@file Motor_Model.h",
+    )
+    content = content.replace(
+        "@brief Defines the parameters for the SM060R20B30MNAD Brushless Gimbal Motor (PMSM).",
+        "@brief User-configured motor parameters.",
+    )
+    # Insert generation note right after @brief line
+    gen_note = (
+        f" * @note Generated by MotorAI Hardware Config on"
+        f" {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
     if preset_name:
-        lines.append(f" * @note Based on preset: {preset_name}")
-    lines.append(f" * @note Generated by MotorAI Hardware Config on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    lines.append(" */")
-    lines.append("")
-    guard = "_FILE_MOTOR_MODEL_H_"
-    lines.append(f"#ifndef {guard}")
-    lines.append(f"#define {guard}")
-    lines.append("")
+        gen_note += f"\n * @note Based on preset: {preset_name}"
+    content = content.replace(
+        " * @details This file contains",
+        f"{gen_note}\n"
+        f" * @details This file contains",
+    )
 
-    # -- Includes --
-    lines.append('#include <ctl/component/motor_control/consultant/unit_consultant.h>')
-    lines.append("")
-
-    # -- Parameters grouped by category --
-    for cat in CATEGORY_ORDER:
-        cat_params = [p for p in PARAM_DEFS if p.category == cat]
-        # Write section comment
-        lines.append(f"// {'='*60}")
-        lines.append(f"// {cat.label}")
-        lines.append(f"// {'='*60}")
-
-        for p in cat_params:
-            value = params.get(p.macro)
-            line = _format_value(p, value, flux_locked)
-            lines.append(line)
-
-        lines.append("")
-
-    # -- Footer --
-    lines.append(f"#endif // {guard}")
-    lines.append("")
-
-    content = "\n".join(lines)
+    # Replace header guard with generic name
+    content = content.replace(
+        "_FILE_MOTOR_PARAM_SM060R20B30MNAD_H_",
+        "_FILE_MOTOR_MODEL_H_",
+    )
 
     # Ensure output directory exists
+    out_dir = os.path.dirname(output_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+
+    with open(output_path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(content)
+
+    return content
+
+
+# ---------------------------------------------------------------------------
+# Driver board generator
+# ---------------------------------------------------------------------------
+
+_BOARD_TEMPLATE = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)),
+    "templates",
+    "Driver_Board_template.h",
+)
+
+# Matches: #define MY_BOARD_XXX <value>  (value can be string, numeric, or enum)
+_RE_BOARD_DEFINE = re.compile(
+    r'^(\s*#define\s+MY_BOARD_\w+\s+)(.+?)(\s*//.*)?$',
+    re.MULTILINE,
+)
+
+from .board_model import BOARD_PARAM_DEFS, ParamKind  # noqa: E402
+
+# Reverse mapping: int → enum name for topology params
+_INT_TO_ENUM = {
+    # Sensor type
+    0: "SENSOR_NONE", 1: "SENSOR_TYPE_SHUNT", 2: "SENSOR_TYPE_HALL", 3: "SENSOR_TYPE_DIRECT",
+    # CS topology
+    # (reuses 1/2/3 with different names → we use the sensor-type names by default)
+    # VS type
+    # 0: "VS_TYPE_NONE", 1: "VS_TYPE_PHASE_GND", 2: "VS_TYPE_LINE_LINE",
+    # Thermal type
+    # 1: "THERMAL_SENSOR_NTC", 2: "THERMAL_SENSOR_PTC", 3: "THERMAL_SENSOR_IC",
+}
+
+# Macro-specific enum name overrides
+_ENUM_OVERRIDE = {
+    "MY_BOARD_PH_CURRENT_SENSE_TOPOLOGY": {1: "CS_TOPOLOGY_LOW_SIDE", 2: "CS_TOPOLOGY_HIGH_SIDE", 3: "CS_TOPOLOGY_INLINE"},
+    "MY_BOARD_PH_VOLTAGE_SENSE_TYPE":     {0: "0", 1: "1", 2: "2"},
+    "MY_BOARD_DCBUS_VOLTAGE_SENSE_TYPE":  {0: "0", 1: "1", 2: "2"},
+    "MY_BOARD_THERMAL_SENSE_TYPE":        {1: "THERMAL_SENSOR_NTC", 2: "THERMAL_SENSOR_PTC", 3: "THERMAL_SENSOR_IC"},
+}
+
+def _enum_name(macro: str, value: int) -> str:
+    """Return the enum name for a topology param value, or the integer as string."""
+    override = _ENUM_OVERRIDE.get(macro, {})
+    if value in override:
+        return override[value]
+    if value in _INT_TO_ENUM:
+        return _INT_TO_ENUM[value]
+    return str(value)
+
+
+def _format_board_value(param, value) -> str:
+    """Format a single MY_BOARD_XXX replacement value."""
+    macro = param.macro
+    if param.kind == ParamKind.STRING:
+        return f'#define {macro} "{value}"'
+    elif param.kind == ParamKind.INT:
+        return f"#define {macro} ({_enum_name(macro, int(value))})"
+    else:
+        # Float
+        if param.decimals == 0:
+            formatted = str(int(value))
+        else:
+            formatted = f"{value:.{param.decimals}f}".rstrip("0")
+            if formatted.endswith("."):
+                formatted += "0"
+            formatted += "f"
+        return f"#define {macro} ({formatted})"
+
+
+def generate_board_model(
+    params: dict[str, Optional[object]],
+    output_path: str,
+    *,
+    preset_name: str = "",
+) -> str:
+    """Generate Driver_Board.h from the template."""
+    if not os.path.isfile(_BOARD_TEMPLATE):
+        raise FileNotFoundError(f"Template not found: {_BOARD_TEMPLATE}")
+
+    with open(_BOARD_TEMPLATE, "r", encoding="utf-8", errors="replace") as fh:
+        content = fh.read()
+
+    # Join only #define continuations, preserving #if/#elif/#else/#endif formatting
+    lines = content.split('\n')
+    result: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if re.match(r'^\s*#define\s+MY_BOARD_\w+', line) and line.rstrip().endswith('\\'):
+            # Accumulate continuation lines into one logical line
+            accumulated = line.rstrip()[:-1].rstrip()
+            i += 1
+            while i < len(lines):
+                next_line = lines[i]
+                accumulated += ' ' + next_line.strip()
+                if not next_line.rstrip().endswith('\\'):
+                    break
+                accumulated = accumulated.rstrip()[:-1].rstrip()
+                i += 1
+            result.append(accumulated)
+        else:
+            result.append(line)
+        i += 1
+    content = '\n'.join(result)
+
+    # Build replacement lookup
+    replacements: dict[str, Optional[str]] = {}
+    for p in BOARD_PARAM_DEFS:
+        val = params.get(p.macro)
+        if val is not None:
+            try:
+                replacements[p.macro] = _format_board_value(p, val)
+            except Exception:
+                replacements[p.macro] = None
+        else:
+            replacements[p.macro] = None
+
+    def _replace(m: re.Match) -> str:
+        prefix = m.group(1).strip()
+        trailing = m.group(3) or ""
+        macro = prefix.split()[1]
+        repl = replacements.get(macro)
+        if repl is not None:
+            return repl + trailing
+        else:
+            return "// " + m.group(0).lstrip()
+
+    content = _RE_BOARD_DEFINE.sub(_replace, content)
+
+    # Update header comments
+    content = content.replace(
+        "@file    GMP_3PH_2136SINV_DUAL_TMPL.h",
+        "@file    Driver_Board.h",
+    )
+    content = content.replace(
+        "@brief   A generic Hardware Abstraction Layer (HAL) template for motor driver boards.",
+        "@brief   User-configured driver board parameters.",
+    )
+    gen_note = (
+        f" * @note Generated by MotorAI Hardware Config on"
+        f" {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+    if preset_name:
+        gen_note += f"\n * @note Based on preset: {preset_name}"
+    content = content.replace(
+        " * @note    This template is intended",
+        f"{gen_note}\n"
+        f" * @note    This template is intended",
+    )
+
+    # Update header guard
+    for old, new in [
+        ("MONKEY_BOARD_H", "DRIVER_BOARD_H"),
+        ("MOTOR_DRIVER_HAL_TEMPLATE_H", "DRIVER_BOARD_H"),
+    ]:
+        content = content.replace(old, new)
+
     out_dir = os.path.dirname(output_path)
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
