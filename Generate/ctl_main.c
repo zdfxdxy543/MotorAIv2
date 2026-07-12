@@ -353,6 +353,11 @@ void Setup_Motor_Current()
     mtr_ctrl_init.mtr_Rs = MOTOR_PARAM_RS;
 
     ctl_auto_tuning_foc_core(&mtr_ctrl_init);
+    // 用 paras.h 的 CUR_KP/CUR_KI 覆盖自整定 PI 增益，使电流环参数可被 Optimize Agent 调优
+    mtr_ctrl_init.kpd = CUR_KP;
+    mtr_ctrl_init.kpq = CUR_KP;
+    mtr_ctrl_init.kid = CUR_KI;
+    mtr_ctrl_init.kiq = CUR_KI;
     ctl_init_foc_core(&mtr_ctrl, &mtr_ctrl_init);
 }
 

@@ -233,7 +233,10 @@ def _build_user_prompt(
     parts.append("  适用于与上一轮结构相同但想尝试不同偏置方向的 exploit 方案。\n")
     parts.append("- `fresh`：使用生成器默认值，不继承任何参数。适用于与上一轮结构完全不同（如 pid→smc）的 explore 方案。\n")
     parts.append("\n**perturbation_direction 写法**（仅 mode=inherit_then_perturb 时需要）：\n")
-    parts.append("- 用自然语言描述：\"提高 VEL_KP 和 POS_KP 约 20%，降低 CUR_LIMIT 约 10%\"\n")
+    parts.append("- 方向词必须从以下选择：提高、增加、加大、升高、上调、降低、减少、减小、下调\n")
+    parts.append("- 百分比必须为纯数字（如 5%、10%），禁止使用 ± 前缀（如 \"±5%\" 应拆为 \"提高 5%\" 或 \"降低 5%\"）\n")
+    parts.append("- 禁止使用模糊动词如 \"做\"、\"调整\"、\"修改\"、\"扰动\" —— 必须指明具体方向\n")
+    parts.append("- 示例：\"提高 VEL_KP 和 POS_KP 约 20%，降低 CUR_LIMIT 约 10%\"\n")
     parts.append("- 基于上一轮的参数值方向，明确指出哪些参数该调大、哪些该调小\n")
     parts.append("\n**参数继承时注意**：\n")
     parts.append("- 如果 source_candidate 的结构与当前候选方案不同（如 pid→smc），")
@@ -420,7 +423,7 @@ def _deduplicate_inherit(profiles: list[dict[str, Any]]) -> list[dict[str, Any]]
             dup["parameter_seed_policy"] = {
                 "mode": "inherit_then_perturb",
                 "source_candidate": source,
-                "perturbation_direction": "在继承参数基础上小幅扰动：关键增益参数 ±5% 以内随机微调，保持整体方向不变",
+                "perturbation_direction": "提高 VEL_KP 约 3%，提高 VEL_KI 约 3%，提高 CUR_KP 约 3%，提高 CUR_KI 约 3%",
             }
             dup["name"] = dup_name + "（微调）" if dup_name else f"继承 {source}（微调）"
         else:

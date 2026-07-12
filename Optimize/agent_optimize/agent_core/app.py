@@ -47,7 +47,7 @@ def _infer_parameter_range(name: str, current_value: float) -> dict[str, Any]:
         return {"min": 0.1, "max": round(max(abs_val * 5.0, 20.0), 4),
                 "description": "自动补全：比例增益"}
     if name_upper.endswith("_KI"):
-        return {"min": 0.0, "max": round(max(abs_val * 5.0, 5.0), 4),
+        return {"min": 0.0, "max": round(max(abs_val * 10.0, 5.0), 4),
                 "description": "自动补全：积分增益"}
     if name_upper.endswith("_KD"):
         return {"min": 0.0, "max": round(max(abs_val * 5.0, 5.0), 4),
