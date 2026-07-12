@@ -471,7 +471,7 @@ def ghost_button_qss(radius: int = RADIUS_CONTROL, padding: str = "7px 14px") ->
     )
 
 
-def flat_button_qss(radius: int = RADIUS_CONTROL, padding: str = "12px 24px") -> str:
+def flat_button_qss(radius: int = RADIUS_CONTROL, padding: str = "8px 18px") -> str:
     t = _current_theme
     return (
         f"QPushButton{{background:{t.panel};border:none;outline:none;border-radius:{radius}px;"

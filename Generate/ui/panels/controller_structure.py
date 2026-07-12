@@ -10,7 +10,7 @@ from styles.theme import current_theme
 class ControllerStructureCanvas(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumHeight(640)
+        self.setMinimumHeight(320)
         self.setFrameShape(QFrame.NoFrame)
         self.setObjectName('CurveCanvas')
         self.setObjectName('ControllerStructureCanvas')

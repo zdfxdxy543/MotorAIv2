@@ -21,6 +21,13 @@ from widgets.chat import TranslationWorker
 from styles.theme import current_theme, ghost_button_qss
 
 
+def _short_id(candidate_id: str) -> str:
+    """candidate_01 → C01"""
+    import re
+    m = re.match(r'candidate_(\d+)$', str(candidate_id))
+    return f'C{m.group(1)}' if m else str(candidate_id)
+
+
 class TuningResultPanel(QWidget):
     def __init__(self, project_json_getter=None, parent=None):
         super().__init__(parent)
@@ -471,8 +478,9 @@ class TuningResultPanel(QWidget):
         for row, item in enumerate(scoreboard):
             candidate_id = str(item.get('candidate_id') or '—')
             is_winner = bool(winner_id and candidate_id == winner_id)
+            short = _short_id(candidate_id)
             values = (
-                f'{candidate_id}（最佳）' if is_winner else candidate_id,
+                f'{short}（最佳）' if is_winner else short,
                 self._format_score(item.get('overall_score')),
                 self._display_status(item.get('status')),
                 self._display_stop_reason(item.get('stop_reason')),

@@ -11,7 +11,7 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSizePolicy,
-    QSplitter,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -47,6 +47,13 @@ from styles.theme import (
     dark_qss,
     primary_button_qss,
 )
+
+
+def _short_id(candidate_id: str) -> str:
+    """candidate_01 → C01"""
+    import re
+    m = re.match(r'candidate_(\d+)$', str(candidate_id))
+    return f'C{m.group(1)}' if m else str(candidate_id)
 
 
 class DrawerHandle(QFrame):
@@ -357,7 +364,7 @@ class MainWindow(QMainWindow):
         file_button = QPushButton('文件')
         file_button.setMenu(file_menu)
         file_button.setStyleSheet(
-            f'QPushButton {{ border: none; background: transparent; padding: 4px 8px; font-size: 24px; color: {current_theme().text}; }}'
+            f'QPushButton {{ border: none; background: transparent; padding: 2px 10px; font-size: 11pt; color: {current_theme().text}; }}'
             'QPushButton::menu-indicator { image: none; width: 0px; }'
             f'QPushButton:hover {{ background: {current_theme().panel_hover}; }}'
         )
@@ -370,7 +377,7 @@ class MainWindow(QMainWindow):
         toolbar_layout.addWidget(self.run_agent_button)
 
         toolbar_layout.addStretch()
-        toolbar.setFixedHeight(48)
+        toolbar.setFixedHeight(36)
 
         # Central area: AI chat is the base canvas; history and result panels
         # float above it as animated off-canvas drawers.
@@ -392,18 +399,47 @@ class MainWindow(QMainWindow):
         self.right_panel_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.right_panel_widget.setMinimumWidth(0)
 
-        right_splitter = QSplitter(Qt.Vertical)
-        right_splitter.setChildrenCollapsible(False)
-        right_splitter.setStyleSheet(
-            f'QSplitter{{background:{current_theme().panel};border:none;}}'
-            f'QSplitter::handle{{background:{current_theme().background};}}'
+        t = current_theme()
+        right_tabs = QTabWidget()
+        right_tabs.setStyleSheet(
+            f'QTabWidget::pane{{'
+            f'  background:{t.panel};'
+            f'  border:1px solid {t.border};'
+            f'  border-radius:0 0 6px 6px;'
+            f'  border-top:none;'
+            f'  top:-1px;'
+            f'}}'
+            f'QTabBar{{'
+            f'  background:{t.panel};'
+            f'  border:none;'
+            f'}}'
+            f'QTabBar::tab{{'
+            f'  background:{t.tab_bg};'
+            f'  color:{t.muted};'
+            f'  border:1px solid {t.border};'
+            f'  border-bottom:none;'
+            f'  border-top-left-radius:6px;'
+            f'  border-top-right-radius:6px;'
+            f'  min-width:72px;'
+            f'  padding:5px 14px;'
+            f'  margin-right:2px;'
+            f'  margin-bottom:0;'
+            f'}}'
+            f'QTabBar::tab:selected{{'
+            f'  background:{t.panel};'
+            f'  color:{t.primary};'
+            f'  font-weight:600;'
+            f'  border-bottom:1px solid {t.panel};'
+            f'}}'
+            f'QTabBar::tab:hover:!selected{{'
+            f'  background:{t.panel_hover};'
+            f'  color:{t.text};'
+            f'}}'
         )
-        right_splitter.addWidget(self.tuning_result_panel)
-        right_splitter.addWidget(self.result_charts_panel)
-        right_splitter.setStretchFactor(0, 2)
-        right_splitter.setStretchFactor(1, 5)
-        right_splitter.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
-        right_splitter.setMinimumWidth(0)
+        right_tabs.addTab(self.tuning_result_panel, '调优结果')
+        right_tabs.addTab(self.result_charts_panel, '仿真图表')
+        right_tabs.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+        right_tabs.setMinimumWidth(0)
 
         self.history_panel = HistoryPanel(
             on_project_selected=self._on_history_project_selected,
@@ -414,7 +450,7 @@ class MainWindow(QMainWindow):
         central = OverlayWorkspace(
             center_widget=self.right_panel_widget,
             left_widget=self.history_panel,
-            right_widget=right_splitter,
+            right_widget=right_tabs,
         )
         self.overlay_workspace = central
         central.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -650,11 +686,11 @@ class MainWindow(QMainWindow):
 
         lines = [f'第 {current_round} 轮调优已完成。']
         if winner:
-            lines.append(f'最高分：{winner["candidate_id"]}（{winner["overall_score"]} 分）')
+            lines.append(f'最高分：{_short_id(winner["candidate_id"])}（{winner["overall_score"]} 分）')
         if scoreboard:
             lines.append('各组得分：')
             for item in scoreboard:
-                lines.append(f'  - {item["candidate_id"]}：{item["overall_score"]} 分')
+                lines.append(f'  - {_short_id(item["candidate_id"])}：{item["overall_score"]} 分')
 
         if exit_code != 0:
             lines.append(f'进程异常退出（返回码 {exit_code}）')

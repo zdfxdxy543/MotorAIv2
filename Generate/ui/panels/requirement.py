@@ -45,7 +45,7 @@ class RequirementPanel(QWidget):
 
         self.input_edit = ChatInputEdit()
         self.input_edit.setPlaceholderText('请输入需求指标描述...')
-        self.input_edit.setFixedHeight(110)
+        self.input_edit.setFixedHeight(72)
         self.input_edit.enterPressed.connect(self.send_requirement)
 
         self.send_btn = QPushButton('发送需求')

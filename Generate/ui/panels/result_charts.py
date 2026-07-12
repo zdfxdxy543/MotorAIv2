@@ -53,6 +53,13 @@ CANDIDATE_COLORS: dict[str, str] = {
 }
 
 
+def _short_id(candidate_id: str) -> str:
+    """candidate_01 → C01"""
+    import re
+    m = re.match(r'candidate_(\d+)$', str(candidate_id))
+    return f'C{m.group(1)}' if m else str(candidate_id)
+
+
 def _candidate_color(cid: str) -> str:
     if cid in CANDIDATE_COLORS:
         return CANDIDATE_COLORS[cid]
@@ -137,7 +144,7 @@ class SpeedWaveformChart(_BaseChart):
             if not time or not values:
                 continue
             color = _candidate_color(cid)
-            ax.plot(time, values, linewidth=1.4, color=color, label=cid, alpha=0.88)
+            ax.plot(time, values, linewidth=1.4, color=color, label=_short_id(cid), alpha=0.88)
 
         if target_value is not None:
             ax.axhline(
@@ -170,13 +177,14 @@ class ScoreBarChart(_BaseChart):
 
         # 按分数升序排列（横条图从下往上）
         sorted_sb = sorted(scoreboard, key=lambda x: x.get("overall_score", 0) or 0)
-        labels = [s.get("candidate_id", "?") for s in sorted_sb]
+        labels_full = [s.get("candidate_id", "?") for s in sorted_sb]
+        labels = [_short_id(l) for l in labels_full]
         scores = [s.get("overall_score") or 0 for s in sorted_sb]
-        colors = [_candidate_color(l) for l in labels]
+        colors = [_candidate_color(l) for l in labels_full]
         edge_colors = [
-            "#f59e0b" if l == winner_id else "none" for l in labels
+            "#f59e0b" if l == winner_id else "none" for l in labels_full
         ]
-        edge_widths = [3 if l == winner_id else 0 for l in labels]
+        edge_widths = [3 if l == winner_id else 0 for l in labels_full]
 
         bars = ax.barh(labels, scores, color=colors, edgecolor=edge_colors,
                        linewidth=edge_widths, height=0.55, alpha=0.88)
@@ -240,7 +248,7 @@ class ParamDeltaChart(_BaseChart):
                 f"{d:+.1f}%", va="center", ha=ha, fontsize=8, color=t.text,
             )
 
-        title = f"参数调优变化量  —  {candidate_id}" if candidate_id else "参数调优变化量"
+        title = f"参数调优变化量  —  {_short_id(candidate_id)}" if candidate_id else "参数调优变化量"
         ax.set_title(title, fontsize=13, fontweight="bold", color=t.text)
         ax.axvline(x=0, color=t.border_strong, linewidth=1.0, alpha=0.6)
         ax.set_xlabel("变化 (%)", color=t.text)
@@ -266,7 +274,7 @@ class AngleWaveformChart(_BaseChart):
             if not time or not values:
                 continue
             color = _candidate_color(cid)
-            ax.plot(time, values, linewidth=1.4, color=color, label=cid, alpha=0.88)
+            ax.plot(time, values, linewidth=1.4, color=color, label=_short_id(cid), alpha=0.88)
 
         ax.set_xlabel("时间 (s)", color=t.text)
         ax.set_ylabel("转角 (rad)", color=t.text)

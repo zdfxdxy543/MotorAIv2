@@ -521,13 +521,13 @@ class MainProgramPanel(QWidget):
 
         self.input_edit = ChatInputEdit()
         self.input_edit.setPlaceholderText('有需求，尽管说')
-        self.input_edit.setFixedHeight(66)
+        self.input_edit.setFixedHeight(48)
         self.input_edit.setStyleSheet(f'''
             QTextEdit {{
                 background: transparent;
                 border: none;
                 border-radius: 0px;
-                padding: 8px 10px;
+                padding: 6px 8px;
                 font-size: 11pt;
                 color: {current_theme().text};
             }}
@@ -592,7 +592,7 @@ class MainProgramPanel(QWidget):
         self.welcome_prompt_label = QLabel('想生成什么电机程序？')
         self.welcome_prompt_label.setStyleSheet(f'''
             QLabel {{
-                font-size: 18pt;
+                font-size: 16pt;
                 font-weight: 700;
                 color: {current_theme().text};
                 border: none;
@@ -609,7 +609,7 @@ class MainProgramPanel(QWidget):
         self.welcome_input_shell.setStyleSheet(_floating_input_card_qss('welcomeInputCard'))
         _apply_floating_input_shadow(self.welcome_input_shell)
         welcome_input_layout = QHBoxLayout(self.welcome_input_shell)
-        welcome_input_layout.setContentsMargins(20, 8, 20, 8)
+        welcome_input_layout.setContentsMargins(14, 6, 14, 6)
         welcome_input_layout.setSpacing(0)
 
         self.welcome_input = QLineEdit()
@@ -619,10 +619,10 @@ class MainProgramPanel(QWidget):
                 background: transparent;
                 border: none;
                 border-radius: 0px;
-                padding: 10px 6px;
-                font-size: 14pt;
+                padding: 6px 4px;
+                font-size: 13pt;
                 color: {current_theme().text};
-                min-height: 46px;
+                min-height: 32px;
             }}
             QLineEdit::placeholder {{
                 color: {current_theme().muted};
@@ -727,7 +727,7 @@ class MainProgramPanel(QWidget):
         self.run_tuning_callback = run_tuning_callback
 
         if self.load_curve_panel is not None:
-            self.load_curve_panel.setMinimumHeight(520)
+            self.load_curve_panel.setMinimumHeight(420)
             if hasattr(self.load_curve_panel, 'set_save_callback'):
                 self.load_curve_panel.set_save_callback(self._on_load_curve_saved)
 
