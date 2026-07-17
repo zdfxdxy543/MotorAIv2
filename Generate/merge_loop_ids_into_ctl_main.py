@@ -386,7 +386,7 @@ def generate_paras(template_text: str, mech_mode: str) -> str:
             "#define POS_KI 1.0f\n",
             "\n",
             "#define VEL_KP 6.0f\n",
-            "#define VEL_KI 30.0f\n",
+            "#define VEL_KI 10.0f\n",
             "\n",
             "#define CUR_KP 1.0f\n",
             "#define CUR_KI 1200.0f\n",

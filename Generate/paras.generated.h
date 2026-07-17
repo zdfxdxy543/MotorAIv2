@@ -6,7 +6,7 @@
 #define POS_KI 1.0f
 
 #define VEL_KP 5.0f
-#define VEL_KI 0.0f
+#define VEL_KI 10.0f
 
 #define CUR_KP 1.0f
 #define CUR_KI 1200.0f
