@@ -376,6 +376,16 @@ class MainWindow(QMainWindow):
         self.run_agent_button.clicked.connect(self.run_agent_optimization)
         toolbar_layout.addWidget(self.run_agent_button)
 
+        self.open_project_dir_button = QPushButton('项目文件')
+        self.open_project_dir_button.setEnabled(False)
+        self.open_project_dir_button.setStyleSheet(
+            f'QPushButton {{ border: none; background: transparent; padding: 2px 10px; font-size: 11pt; color: {current_theme().text}; }}'
+            f'QPushButton:hover {{ background: {current_theme().panel_hover}; }}'
+            'QPushButton:disabled { color: #888888; }'
+        )
+        self.open_project_dir_button.clicked.connect(self.open_project_directory)
+        toolbar_layout.addWidget(self.open_project_dir_button)
+
         toolbar_layout.addStretch()
         toolbar.setFixedHeight(36)
 
@@ -502,11 +512,18 @@ class MainWindow(QMainWindow):
         if dialog.exec_() == QDialog.Accepted and dialog.project_json_path:
             self.current_project_json_path = Path(dialog.project_json_path)
             self.action_network_config.setEnabled(True)
+            self.open_project_dir_button.setEnabled(True)
             QMessageBox.information(self, '已加载项目', f'当前项目：{self.current_project_json_path}')
             self._refresh_project_panels()
             self._load_panel_data()
             add_to_history(self.current_project_json_path)
             self.history_panel.refresh()
+
+    def open_project_directory(self):
+        if not self.current_project_json_path:
+            return
+        project_dir = Path(self.current_project_json_path).parent
+        os.startfile(str(project_dir))
 
     def get_current_project_json_path(self):
         return self.current_project_json_path
@@ -785,6 +802,7 @@ class MainWindow(QMainWindow):
                 raise ValueError('JSON 顶层必须是对象')
             self.current_project_json_path = selected
             self.action_network_config.setEnabled(True)
+            self.open_project_dir_button.setEnabled(True)
             QMessageBox.information(self, '已加载项目', f'当前项目：{self.current_project_json_path}')
             self._refresh_project_panels()
             self._load_panel_data()
@@ -805,6 +823,7 @@ class MainWindow(QMainWindow):
                 raise ValueError("JSON 顶层必须是对象")
             self.current_project_json_path = json_path
             self.action_network_config.setEnabled(True)
+            self.open_project_dir_button.setEnabled(True)
             self._refresh_project_panels()
             self._load_panel_data()
             add_to_history(json_path)
