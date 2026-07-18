@@ -842,12 +842,12 @@ class MainProgramPanel(QWidget):
             '你是面向 loop-ids 生成系统的控制器需求完善助手。'
             '你的任务是把用户原始需求改写为可直接用于控制环路选择与程序生成的中文需求。'
             '控制结构、环路层级、控制方法、PWM 调制策略和候选方案侧重是 MotorAI 需要根据需求推断和设计的内容；'
-            '不要要求用户先指定速度环/位置环/电流环、pid/mit/smc、PWM 频率或具体控制结构。'
+            '不要要求用户先指定速度环/位置环/电流环、pid/ladrc、PWM 频率或具体控制结构。'
             '如果用户只给出应用场景或模糊目标，也要给出合理工程假设并继续整理需求。'
             '重点聚焦以下内容：'
             '1) 根据场景推断是否需要电流环（current_loop），并明确目标、约束、动态响应与可测量量；'
             '2) 根据场景推断机械环（mech_loop）的控制目标与结构层级（速度或位置）；'
-            '3) 根据目标自行选择机械环控制方法（pid/mit/smc）并写出选择依据；'
+            '3) 根据目标自行选择机械环控制方法（pid/ladrc）并写出选择依据；'
             '4) 明确内外环关系、必要信号链路与关键性能指标。'
             '默认工程假设：吸尘器/风机/泵类驱动按高速 BLDC/PMSM 速度控制处理；'
             '伺服驱动按 PMSM 位置-速度-电流级联处理；电流环驱动按 PMSM FOC 电流环处理；'
@@ -1366,7 +1366,8 @@ class MainProgramPanel(QWidget):
             with open(project_json, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             write_common_requirement_snapshot(Path(project_json), data)
-            for candidate_dir in self._candidate_dirs():
+            detected_methods = self._detect_control_methods(requirement_text)
+            for index, candidate_dir in enumerate(self._candidate_dirs(), start=1):
                 candidate_json = candidate_dir / 'candidate.json'
                 if not candidate_json.exists():
                     continue
@@ -1374,11 +1375,40 @@ class MainProgramPanel(QWidget):
                     candidate_data = json.load(f)
                 if isinstance(candidate_data, dict):
                     candidate_data['objective_text'] = requirement_text
+                    if detected_methods:
+                        design_profile = candidate_data.get('design_profile')
+                        if isinstance(design_profile, dict):
+                            core = [m for m in detected_methods if m in {"pid", "ladrc", "smc", "mit"}]
+                            if not core:
+                                core = ["pid"]
+                            design_profile['preferred_control_methods'] = core
+                            candidate_data['design_profile'] = design_profile
                     with open(candidate_json, 'w', encoding='utf-8') as f:
                         json.dump(candidate_data, f, ensure_ascii=False, indent=2)
             self._append_debug('需求已保存到当前项目。')
         except Exception as exc:
             self._append_error('需求保存失败。', str(exc))
+
+    @staticmethod
+    def _detect_control_methods(text: str) -> set:
+        """从需求文本中检测控制方法关键词。"""
+        method_map = [
+            ("自抗扰", "ladrc"), ("线性自抗扰", "ladrc"),
+            ("ladrc", "ladrc"), ("adrc", "ladrc"),
+            ("滑模", "smc"), ("smc", "smc"),
+            ("扰动观测", "disturbance_observer"),
+            ("前馈", "feedforward"), ("feedforward", "feedforward"),
+            ("增益调度", "gain_scheduling"), ("gain scheduling", "gain_scheduling"),
+            ("滤波", "filtering"),
+            ("斜坡", "ramp_limit"),
+            ("pid", "pid"), ("mit", "mit"),
+        ]
+        low_text = text.lower()
+        detected = set()
+        for keyword, method in method_map:
+            if keyword in low_text:
+                detected.add(method)
+        return detected
 
     def _apply_candidate_profile_overrides(self, text: str):
         project_json = self._project_json_path()

@@ -353,15 +353,15 @@ def _infer_mech_method(requirement: str, raw_props: list[str], *, original_requi
         if prop in MECH_METHODS:
             return prop
 
-    # 模式3：从 requirement 关键字推断
-    low_req = (requirement or "").lower()
-    if " smc" in f" {low_req}" or "滑模" in requirement:
+    # 模式3：从 search_text（拼接了中文原始需求）关键字推断
+    low_req = (search_text or "").lower()
+    if " smc" in f" {low_req}" or "滑模" in search_text:
         return "smc"
-    if " mit" in f" {low_req}" or " model-in-the-loop" in low_req or "模型在环" in requirement:
+    if " mit" in f" {low_req}" or " model-in-the-loop" in low_req or "模型在环" in search_text:
         return "mit"
-    if " ladrc" in f" {low_req}" or "adrc" in low_req or "自抗扰" in requirement or "线性自抗扰" in requirement:
+    if " ladrc" in f" {low_req}" or "adrc" in low_req or "自抗扰" in search_text or "线性自抗扰" in search_text:
         return "ladrc"
-    if " pid" in f" {low_req}" or "比例积分" in requirement:
+    if " pid" in f" {low_req}" or "比例积分" in search_text:
         return "pid"
     return "pid"
 
@@ -480,7 +480,7 @@ def _normalize_mechanical_loops(payload: dict[str, Any], *, original_requirement
     if not mech_added and any(("speed" in (l.get("name") or "").lower() or "position" in (l.get("name") or "").lower()) for l in loops):
         new_loops.insert(0, {"id": "loop_mech_001", "name": "mech_loop", "properties": ["speed", mech_method]})
 
-    # Ensure mech_loop always keeps two ordered attributes: [speed|position, pid|mit|smc]
+    # Ensure mech_loop always keeps two ordered attributes: [speed|position, pid|ladrc]
     for loop in new_loops:
         if (loop.get("name") or "").lower() != "mech_loop":
             continue

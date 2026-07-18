@@ -6,7 +6,7 @@ normalized (speed/position -> mech, position wins).
 
 For `mech_loop`, properties always contain two ordered attributes:
 1) target mode: speed or position
-2) control method: pid, mit, or smc
+2) control method: pid or ladrc
 """
 from __future__ import annotations
 
@@ -98,7 +98,7 @@ def main(requirement: str | None = None) -> int:
         cid = canonical_id_for(lname)
 
         # Determine properties from the original blocks.
-        # mech_loop uses dual-attribute properties: [speed|position, pid|mit|smc]
+        # mech_loop uses dual-attribute properties: [speed|position, pid|ladrc]
         prop = pick_property_from_original(original.get("blocks") or [], name)
         if lname == "mech_loop":
             # SMC is position-only — force target to position.
