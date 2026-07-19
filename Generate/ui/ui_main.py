@@ -355,6 +355,10 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.action_load)
         file_menu.addAction(self.action_settings)
         file_menu.addAction(self.action_network_config)
+        file_menu.addSeparator()
+        self.action_hardware_design = QAction('硬件设计', self)
+        file_menu.addAction(self.action_hardware_design)
+        self.action_hardware_design.triggered.connect(self.open_hardware_design)
         self.action_new.triggered.connect(self.open_new_project_dialog)
         self.action_load.triggered.connect(self.open_project_json)
         self.action_save.triggered.connect(self.save_project_json)
@@ -506,6 +510,32 @@ class MainWindow(QMainWindow):
             return
         dialog = NetworkConfigDialog(project_json_getter=self.get_current_project_json_path, parent=self)
         dialog.exec_()
+
+    def open_hardware_design(self):
+        """以独立进程方式打开硬件配置工具。"""
+        hw_path = str(MOTORAI_ROOT / 'HardwareConfig')
+
+        # 把主界面配好的 GMP 根目录同步到 HardwareConfig 的配置文件，
+        # 这样打开硬件窗口时就不会再弹 GMP 路径选择框了。
+        gmp_root = (load_settings().get('paths') or {}).get('gmp_root', '') or ''
+        hw_config_path = os.path.join(hw_path, 'config.json')
+        if gmp_root and os.path.isdir(gmp_root):
+            try:
+                existing = {}
+                if os.path.isfile(hw_config_path):
+                    with open(hw_config_path, 'r', encoding='utf-8') as fh:
+                        existing = json.load(fh)
+                existing['gmp_root'] = gmp_root
+                os.makedirs(os.path.dirname(hw_config_path), exist_ok=True)
+                with open(hw_config_path, 'w', encoding='utf-8') as fh:
+                    json.dump(existing, fh, indent=2, ensure_ascii=False)
+            except Exception:
+                pass
+
+        subprocess.Popen(
+            [sys.executable, os.path.join(hw_path, 'main.py')],
+            cwd=hw_path,
+        )
 
     def open_new_project_dialog(self):
         dialog = NewProjectDialog(self)

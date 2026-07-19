@@ -29,6 +29,9 @@ from PyQt5.QtWidgets import (
     QButtonGroup,
     QHBoxLayout,
     QApplication,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
 )
 
 from ui.styles import app_stylesheet
@@ -84,8 +87,7 @@ class MainWindow(QMainWindow):
         if gmp_root and os.path.isdir(gmp_root):
             self._gmp_root = gmp_root
             self._on_gmp_root_ready()
-        else:
-            self._prompt_gmp_root()
+        # 不再自动弹窗选择目录，用户可通过菜单打开设置对话框
 
         self._output_path_motor = cfg.get("output_dir_motor", "")
         self._output_path_board = cfg.get("output_dir_board", "")
@@ -98,7 +100,7 @@ class MainWindow(QMainWindow):
         mb = self.menuBar()
         file_menu = mb.addMenu("文件(&F)")
         set_gmp = QAction("设置 GMP 根目录...", self)
-        set_gmp.triggered.connect(self._prompt_gmp_root)
+        set_gmp.triggered.connect(self._show_gmp_settings_dialog)
         file_menu.addAction(set_gmp)
         file_menu.addSeparator()
         quit_action = QAction("退出(&Q)", self)
@@ -201,7 +203,7 @@ class MainWindow(QMainWindow):
     def _build_statusbar(self):
         self._status = QStatusBar()
         self.setStatusBar(self._status)
-        self._status.showMessage("请选择预设，或设置 GMP 根目录。")
+        self._status.showMessage("请通过 文件 → 设置 GMP 根目录 进行配置。")
 
     def _apply_style(self):
         self.setStyleSheet(app_stylesheet())
@@ -226,17 +228,59 @@ class MainWindow(QMainWindow):
     # GMP root
     # ------------------------------------------------------------------
 
-    def _prompt_gmp_root(self):
-        path = QFileDialog.getExistingDirectory(
-            self, "选择 GMP 根目录", self._gmp_root or os.getcwd()
-        )
-        if path:
-            self._gmp_root = path
-            self._on_gmp_root_ready()
-            cfg = _load_config()
-            cfg["gmp_root"] = path
-            _save_config(cfg)
-            self._status.showMessage(f"GMP 根目录: {path}")
+    def _show_gmp_settings_dialog(self):
+        """弹出 GMP 根目录设置对话框（输入框 + 浏览按钮）。"""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("设置 GMP 根目录")
+        dlg.resize(520, 100)
+        dlg.setObjectName("SettingsDialog")
+
+        layout = QVBoxLayout(dlg)
+        form = QFormLayout()
+
+        row = QWidget()
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(6)
+
+        gmp_edit = QLineEdit()
+        gmp_edit.setPlaceholderText("请选择或输入 GMP 根目录")
+        gmp_edit.setText(self._gmp_root)
+
+        def browse():
+            path = QFileDialog.getExistingDirectory(dlg, "选择 GMP 根目录", gmp_edit.text() or os.getcwd())
+            if path:
+                gmp_edit.setText(path)
+
+        browse_btn = QPushButton("浏览...")
+        browse_btn.clicked.connect(browse)
+
+        row_layout.addWidget(gmp_edit)
+        row_layout.addWidget(browse_btn)
+        form.addRow("GMP根目录", row)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(lambda: self._on_gmp_settings_accepted(gmp_edit.text().strip(), dlg))
+        buttons.rejected.connect(dlg.reject)
+
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+        dlg.exec_()
+
+    def _on_gmp_settings_accepted(self, path: str, dlg: QDialog):
+        if not path:
+            QMessageBox.warning(dlg, "提示", "请输入或选择 GMP 根目录。")
+            return
+        if not os.path.isdir(path):
+            QMessageBox.warning(dlg, "提示", f"目录不存在：\n{path}")
+            return
+        self._gmp_root = path
+        self._on_gmp_root_ready()
+        cfg = _load_config()
+        cfg["gmp_root"] = path
+        _save_config(cfg)
+        self._status.showMessage(f"GMP 根目录: {path}")
+        dlg.accept()
 
     def _on_gmp_root_ready(self):
         """Notify both preset lists of the GMP root."""
