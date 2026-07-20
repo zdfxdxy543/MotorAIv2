@@ -20,6 +20,11 @@ from .tools import (
 )
 from .tools.optimization import validate_tuning_policy_coverage
 from .parameters.parameter_header_editor import ParameterHeaderError, read_tunable_parameters
+from .parameters.parameter_history import (
+    ParameterHistoryError,
+    append_optimization_history,
+    build_history_record,
+)
 
 
 def _infer_parameter_range(name: str, current_value: float) -> dict[str, Any]:
@@ -572,6 +577,58 @@ def _build_iteration_prompt(
     )
 
 
+def _append_final_history_record(
+    ctx: ProjectContext,
+    job_file: Path,
+    job: Dict[str, Any],
+    header_path: Path | None,
+) -> None:
+    """Append a final evaluation record to optimization_history.jsonl.
+
+    When the last iteration only runs ``run_one_tuning_iteration`` (no
+    ``apply_parameter_update_and_record``), the final evaluation result is
+    never captured in the history.  This writes a terminal record so that
+    the on-disk evaluation_result.json and the history stay consistent.
+    """
+    if header_path is None or not header_path.exists():
+        return
+
+    paths = job.get("paths") or {}
+    history_path = _resolve_job_relative_path(
+        job_file,
+        (paths.get("optimization_history")
+         or paths.get("history_path")
+         or "log/optimize/optimization_history.jsonl"),
+    )
+    if history_path is None:
+        return
+
+    evaluation_result_path = _automation_path(ctx, "evaluation_result", "../log/evaluation_result.json")
+    evaluation_result = _read_json_file_if_exists(evaluation_result_path)
+    if not evaluation_result:
+        return
+
+    try:
+        current_params = read_tunable_parameters(header_path)
+    except (ParameterHeaderError, OSError):
+        current_params = {}
+
+    record = build_history_record(
+        parameters_before=dict(current_params),
+        parameters_after=dict(current_params),
+        evaluation_result=evaluation_result,
+        agent_reason="最终迭代评估（最后一轮仿真，未修改参数）。",
+        simulation_success=True,
+        parameter_updates={},
+        extra={"is_final": True},
+    )
+
+    try:
+        append_optimization_history(history_path, record)
+    except (ParameterHistoryError, OSError):
+        pass  # 写入失败不阻塞主流程
+
+
 def run_headless_job(
     job_file: Path,
     llm: LLMClient,
@@ -788,6 +845,14 @@ def run_headless_job(
         result["status"] = "completed"
         result["stop_reason"] = "max_iterations_reached"
         result["final_evaluation"] = _compact_evaluation_summary(_load_latest_evaluation_result(ctx))
+
+        # ── 追加最终评估记录到 optimization_history ──────────────────
+        # 最后一轮迭代只调 run_one_tuning_iteration（不调 apply），
+        # 因此最后一次仿真的结果没有写入 history。这里补一条记录，
+        # 确保 evaluation_result.json 的分数和 history 最后一条一致。
+        _append_final_history_record(ctx, job_file, job, header_path)
+        # ───────────────────────────────────────────────────────────────
+
         write_result_json(result_file, result)
         print(f"[headless] completed {max_iterations} iteration(s). result={result_file}")
         return 0

@@ -420,6 +420,24 @@ def run_competition(
                             if src_sim.exists():
                                 shutil.copy2(src_sim, backup_sim / sim_name)
 
+        # ── 清理跨轮污染文件 ──────────────────────────────────────
+        # 备份完成后删除 optimization_history.jsonl 和
+        # evaluation_result.json，防止新轮次的 _find_previous_score
+        # / _find_best_score 跨轮比较上一轮的数据。
+        for cdir in sorted((project_root / "candidates").glob("candidate_*")):
+            if cdir.is_dir():
+                log_opt = cdir / "log" / "optimize"
+                for name in ("optimization_history.jsonl",
+                             "evaluation_result.json",
+                             "tuning_result.json"):
+                    doomed = log_opt / name
+                    if doomed.exists():
+                        try:
+                            doomed.unlink()
+                        except OSError:
+                            pass
+        # ───────────────────────────────────────────────────────────
+
         # 用本轮 profiles 覆盖 common
         round_profiles = project_root / "rounds" / f"round_{round_number:02d}" / "candidate_profiles.json"
         if round_profiles.exists():

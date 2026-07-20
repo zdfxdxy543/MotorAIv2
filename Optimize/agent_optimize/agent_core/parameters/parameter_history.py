@@ -187,6 +187,26 @@ def _find_previous_score(records: Iterable[Record]) -> Optional[float]:
     return None
 
 
+def _find_best_score(records: Iterable[Record]) -> Optional[float]:
+    """Return the best (highest) overall_score across all history records.
+
+    This is used as the correct baseline for determining whether the current
+    iteration truly improved the objective, as opposed to _find_previous_score
+    which returns the last record's score (which may be a rolled-back failure).
+    """
+    best: Optional[float] = None
+    for item in records:
+        score: Optional[float] = None
+        if "overall_score" in item:
+            score = _safe_float(item.get("overall_score"))
+        if score is None:
+            score = extract_overall_score(item.get("evaluation_result"))
+        if score is not None:
+            if best is None or score > best:
+                best = score
+    return best
+
+
 def normalize_history_record(path: PathLike, record: Record) -> Record:
     """Return a validated copy of *record* with useful fields completed.
 
@@ -197,6 +217,13 @@ def normalize_history_record(path: PathLike, record: Record) -> Record:
         - previous_overall_score
         - overall_score_delta
         - overall_score_improved
+        - best_score_so_far
+
+    * overall_score_improved compares against the **best** score across all
+      existing records (not just the immediately preceding record), so that
+      a post-rollback attempt is correctly judged against the all-time best.
+    * previous_overall_score still records the immediate predecessor, which
+      is useful for trend analysis even when rollback occurred.
 
     The input record is not mutated.
     """
@@ -218,6 +245,7 @@ def normalize_history_record(path: PathLike, record: Record) -> Record:
         current_score_float = extract_overall_score(normalized.get("evaluation_result"))
 
     previous_score = _find_previous_score(existing_records)
+    best_score = _find_best_score(existing_records)
 
     if current_score_float is not None:
         normalized["overall_score"] = current_score_float
@@ -225,12 +253,24 @@ def normalize_history_record(path: PathLike, record: Record) -> Record:
     if previous_score is not None:
         normalized["previous_overall_score"] = previous_score
 
-    if current_score_float is not None and previous_score is not None:
-        delta = current_score_float - previous_score
-        normalized["overall_score_delta"] = delta
-        normalized["overall_score_improved"] = delta > 0
+    # ── 评分改善判断：与历史最佳分比较，而非仅与上一条记录 ──────
+    # 这样可以防止"回退后下次尝试比烂分好就误判为进步"的问题。
+    if current_score_float is not None and best_score is not None:
+        normalized["best_score_so_far"] = best_score
+        normalized["overall_score_improved"] = current_score_float > best_score
+        # delta 仍相对于上一条记录，方便 trace 趋势
+        if previous_score is not None:
+            normalized["overall_score_delta"] = current_score_float - previous_score
+    elif current_score_float is not None and previous_score is not None:
+        # 第一条有分数的记录：没有 best_score，回退到跟 previous 比
+        normalized["best_score_so_far"] = current_score_float
+        normalized["overall_score_delta"] = current_score_float - previous_score
+        normalized["overall_score_improved"] = current_score_float > previous_score
     elif "overall_score_improved" not in normalized:
         normalized["overall_score_improved"] = None
+        if current_score_float is not None:
+            # 第一个记录：自身就是最佳
+            normalized["best_score_so_far"] = current_score_float
 
     return normalized
 
