@@ -1395,19 +1395,25 @@ class MainProgramPanel(QWidget):
         method_map = [
             ("自抗扰", "ladrc"), ("线性自抗扰", "ladrc"),
             ("ladrc", "ladrc"), ("adrc", "ladrc"),
-            ("滑模", "smc"), ("smc", "smc"),
+            ("滑模控制", "smc"), ("smc", "smc"),
             ("扰动观测", "disturbance_observer"),
             ("前馈", "feedforward"), ("feedforward", "feedforward"),
             ("增益调度", "gain_scheduling"), ("gain scheduling", "gain_scheduling"),
             ("滤波", "filtering"),
             ("斜坡", "ramp_limit"),
-            ("pid", "pid"), ("mit", "mit"),
+            ("pid", "pid"), (" pi ", "pid"), ("pi控制", "pid"), ("pi调节", "pid"),
+            ("比例积分", "pid"),
+            ("mit", "mit"),
         ]
         low_text = text.lower()
         detected = set()
         for keyword, method in method_map:
             if keyword in low_text:
                 detected.add(method)
+        # "滑模观测器" 是无传感器速度估计算法，不是控制方法，不要把它的
+        # "滑模" 子串误判为 SMC 控制。
+        if "滑模观测" in low_text and "滑模控制" not in low_text:
+            detected.discard("smc")
         return detected
 
     def _apply_candidate_profile_overrides(self, text: str):
