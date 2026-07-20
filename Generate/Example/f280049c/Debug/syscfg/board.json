@@ -1,0 +1,20 @@
+{
+    "interruptInfo" : [
+        {
+            "interruptName": "INT_IRIS_ADCA_1",
+            "interruptHandler": "MainISR"
+        },
+        {
+            "interruptName": "INT_IRIS_CAN_0",
+            "interruptHandler": "INT_IRIS_CAN_0_ISR"
+        },
+        {
+            "interruptName": "INT_IRIS_CAN_1",
+            "interruptHandler": "INT_IRIS_CAN_1_ISR"
+        },
+        {
+            "interruptName": "INT_IRIS_UART_USB_RX",
+            "interruptHandler": "INT_IRIS_UART_USB_RX_ISR"
+        }
+    ]
+}

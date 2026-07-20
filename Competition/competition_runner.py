@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -594,6 +595,67 @@ def run_competition(
     return result
 
 
+def _copy_hardware_template_to_winner(result: dict[str, Any], project_json: Path) -> None:
+    """将硬件平台工程模板复制到全局最优候选方案的 project 目录下。
+
+    从 iteration_summary.json 读取跨轮次最高分候选人及其所在轮次，
+    同时复制到 candidates/ 当前工作目录和对应轮次的 rounds/ 备份目录。
+    若 iteration_summary 不可用则回退到最后一轮 winner。
+    """
+    source = MOTORAI_ROOT / "Generate" / "Example" / "f280049c"
+    if not source.is_dir():
+        print(f"Warning: hardware template not found at {source}", file=sys.stderr)
+        return
+
+    project_root = project_json.expanduser().resolve().parent
+
+    # 从 iteration_summary 获取全局最优候选人及所在轮次
+    candidate_id = ""
+    best_round: int | None = None
+    summary_path = project_root / "rounds" / "iteration_summary.json"
+    try:
+        if summary_path.exists():
+            summary = load_json_object(summary_path)
+            overview = summary.get("overview") if isinstance(summary.get("overview"), dict) else {}
+            cid = str(overview.get("best_score_candidate", ""))
+            br = overview.get("best_score_round")
+            if cid and isinstance(br, int):
+                candidate_id = cid
+                best_round = br
+    except Exception:
+        pass
+
+    if not candidate_id:
+        winner = result.get("winner")
+        if isinstance(winner, dict):
+            candidate_id = str(winner.get("candidate_id", ""))
+        best_round = None
+
+    if not candidate_id:
+        print("Warning: no best candidate found, skip hardware template copy.", file=sys.stderr)
+        return
+
+    # ── 复制到当前工作目录 ──────────────────────────────────────
+    target_current = project_root / "candidates" / candidate_id / "project" / source.name
+    if target_current.exists():
+        shutil.rmtree(target_current)
+    shutil.copytree(source, target_current)
+    print(f"Hardware template copied to: {target_current}", file=sys.stderr)
+
+    # ── 如果最优轮次不是最后一轮，同时复制到对应 rounds/ 备份 ────
+    last_round = max(
+        (int(d.name.replace("round_", "")) for d in (project_root / "rounds").glob("round_*") if d.is_dir()),
+        default=0,
+    )
+    if best_round is not None and best_round != last_round:
+        target_round = project_root / "rounds" / f"round_{best_round:02d}" / "candidates" / candidate_id / "project" / source.name
+        target_round.parent.mkdir(parents=True, exist_ok=True)
+        if target_round.exists():
+            shutil.rmtree(target_round)
+        shutil.copytree(source, target_round)
+        print(f"Hardware template also copied to best round: {target_round}", file=sys.stderr)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run MotorAI candidate competition from the command line.")
     parser.add_argument("project_json", type=Path)
@@ -641,6 +703,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"iteration_summary written: {summary_path}", file=sys.stderr)
         except Exception as exc:
             print(f"Warning: iteration_summary generation failed: {exc}", file=sys.stderr)
+
+        # ── 将硬件平台工程模板复制到最优候选方案 ──────────────────────
+        try:
+            _copy_hardware_template_to_winner(result, args.project_json)
+        except Exception as exc:
+            print(f"Warning: hardware template copy failed: {exc}", file=sys.stderr)
 
     except Exception as exc:
         print(f"Error: {type(exc).__name__}: {exc}", file=sys.stderr)

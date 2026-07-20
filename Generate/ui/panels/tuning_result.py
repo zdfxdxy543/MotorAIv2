@@ -15,6 +15,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import QFileSystemWatcher
 from PyQt5.QtCore import Qt
 import json
+import os
 from pathlib import Path
 
 from widgets.chat import TranslationWorker
@@ -63,6 +64,10 @@ class TuningResultPanel(QWidget):
         title_label.setStyleSheet(f'font-size:14px;font-weight:600;color:{t.muted};')
         title_layout.addWidget(title_label)
         title_layout.addStretch()
+        self.open_best_btn = QPushButton('打开最优方案')
+        self.open_best_btn.setStyleSheet(ghost_button_qss(padding='4px 10px'))
+        self.open_best_btn.clicked.connect(self._open_best_candidate_folder)
+        title_layout.addWidget(self.open_best_btn)
         refresh_btn = QPushButton('刷新结果')
         refresh_btn.setStyleSheet(ghost_button_qss(padding='4px 10px'))
         refresh_btn.clicked.connect(self.refresh_from_project)
@@ -330,6 +335,57 @@ class TuningResultPanel(QWidget):
                     path = Path(str(path_text))
                     if path.exists():
                         return path
+        return None
+
+    def _open_best_candidate_folder(self):
+        """打开全局最优候选方案的文件夹。"""
+        candidate_dir = self._best_candidate_dir()
+        if candidate_dir is None:
+            return
+        os.startfile(str(candidate_dir))
+
+    def _best_candidate_dir(self) -> Path | None:
+        """从 competition_run_result.json 中解析最优候选方案的目录。"""
+        competition_path = self._competition_result_path()
+        if competition_path is None:
+            return None
+        try:
+            payload = self._read_json(competition_path)
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+
+        # 优先取 winner 的 tuning_result，回退到 scoreboard 最高分
+        winner = payload.get('winner')
+        if isinstance(winner, dict):
+            path_text = winner.get('tuning_result')
+            if path_text:
+                p = Path(str(path_text))
+                if p.exists():
+                    return p.parent.parent.parent  # tuning_result.json → optimize → log → candidate_dir
+
+        scoreboard = payload.get('scoreboard')
+        if isinstance(scoreboard, list):
+            best_path = None
+            best_score = None
+            for item in scoreboard:
+                if not isinstance(item, dict):
+                    continue
+                path_text = item.get('tuning_result')
+                if not path_text:
+                    continue
+                p = Path(str(path_text))
+                if not p.exists():
+                    continue
+                score = item.get('overall_score')
+                if isinstance(score, (int, float)):
+                    if best_score is None or float(score) > best_score:
+                        best_score = float(score)
+                        best_path = p
+            if best_path is not None:
+                return best_path.parent.parent.parent
+
         return None
 
     def _resolve_result_source(self):

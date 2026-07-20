@@ -285,6 +285,7 @@ class MainWindow(QMainWindow):
     def _on_gmp_root_ready(self):
         """Notify both preset lists of the GMP root."""
         self._motor_presets.set_gmp_root(self._gmp_root)
+        self._status.showMessage(f"GMP 根目录: {self._gmp_root}")
         # Board presets: scan inverter_3ph directory + extra standalone files
         board_dir = os.path.join(
             self._gmp_root, "ctl", "component", "hardware_preset", "inverter_3ph"
