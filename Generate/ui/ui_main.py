@@ -21,7 +21,6 @@ from PyQt5.QtCore import (
     QProcess,
     QPropertyAnimation,
     Qt,
-    QTimer,
     pyqtProperty,
     pyqtSignal,
 )
@@ -319,6 +318,8 @@ class MainWindow(QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.current_project_json_path = None
+        self._competition_process = None
+        self._competition_project_json_path = None
 
         # ── load theme BEFORE creating any widgets ──
         self._apply_visual_theme()
@@ -604,6 +605,7 @@ class MainWindow(QMainWindow):
         if not project_json_path:
             QMessageBox.warning(self, '提示', '请先打开或创建一个项目文件')
             return
+        project_json_path = Path(project_json_path).expanduser().resolve()
 
         try:
             with open(project_json_path, 'r', encoding='utf-8') as f:
@@ -620,29 +622,44 @@ class MainWindow(QMainWindow):
                     return
                 candidate_count = int(project_data.get('candidate_count') or 4)
 
-                # 使用 QProcess 监控进程完成，支持多轮自动继续
+                # 一个 runner 负责该工程的全部大轮；界面切换不改变任务归属。
                 project_dir = Path(project_json_path).parent
                 log_dir = project_dir / 'log' / 'ui'
                 log_dir.mkdir(parents=True, exist_ok=True)
                 stdout_path = log_dir / 'competition_runner_stdout.txt'
                 stderr_path = log_dir / 'competition_runner_stderr.txt'
 
-                # 如果已有调优进程在运行，先终止旧进程
-                old_proc = getattr(self, '_competition_process', None)
-                if old_proc is not None and old_proc.state() != QProcess.NotRunning:
-                    old_proc.kill()
-                    old_proc.waitForFinished(3000)
+                active_proc = self._competition_process
+                if active_proc is not None and active_proc.state() != QProcess.NotRunning:
+                    active_project = self._competition_project_json_path
+                    active_name = (
+                        Path(active_project).stem if active_project else '当前工程'
+                    )
+                    QMessageBox.warning(
+                        self,
+                        '调优任务正在运行',
+                        f'工程“{active_name}”的调优任务仍在运行。\n'
+                        '可以继续浏览其他工程，但请等待该任务结束后再启动新的调优任务。',
+                    )
+                    return
 
-                self._competition_process = QProcess(self)
-                self._competition_process.setProcessChannelMode(QProcess.SeparateChannels)
-                self._competition_process.setWorkingDirectory(str(MOTORAI_ROOT))
+                process = QProcess(self)
+                self._competition_process = process
+                self._competition_project_json_path = project_json_path
+                process.setProcessChannelMode(QProcess.SeparateChannels)
+                process.setWorkingDirectory(str(MOTORAI_ROOT))
 
-                self._competition_process.setStandardOutputFile(str(stdout_path))
-                self._competition_process.setStandardErrorFile(str(stderr_path))
-                self._competition_process.finished.connect(
-                    lambda exit_code, exit_status:
-                        self._on_competition_finished(exit_code, exit_status,
-                                                       project_json_path)
+                process.setStandardOutputFile(str(stdout_path))
+                process.setStandardErrorFile(str(stderr_path))
+                process.finished.connect(
+                    lambda exit_code, exit_status, task_process=process,
+                           task_project=project_json_path:
+                        self._on_competition_finished(
+                            exit_code,
+                            exit_status,
+                            task_project,
+                            task_process,
+                        )
                 )
 
                 # 确定当前轮次：手动点击永远从 1 开始，自动继续才传具体轮次
@@ -658,12 +675,11 @@ class MainWindow(QMainWindow):
                     '--parallel', '2',
                     '--optimize-parallel', '1',
                     '--round', str(current_round),
-                    '--force-next-round',
                 ]
                 if current_round <= 1:
                     cmd_args.append('--skip-generate')
 
-                self._competition_process.start(sys.executable, cmd_args)
+                process.start(sys.executable, cmd_args)
                 right_panel = self.right_panel()
                 if right_panel is not None:
                     try:
@@ -696,13 +712,21 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, '错误', f'启动失败：{type(exc).__name__}: {exc}')
 
-    def _on_competition_finished(self, exit_code, exit_status, project_json_path):
-        """所有 candidate 调优完成后，读取结果并自动决定是否继续下一轮。"""
-        # 清理进程引用
-        proc = getattr(self, '_competition_process', None)
-        if proc is not None:
-            proc.deleteLater()
-            self._competition_process = None
+    def _on_competition_finished(
+        self,
+        exit_code,
+        exit_status,
+        project_json_path,
+        process,
+    ):
+        """Runner 完成后，仅在任务工程仍为当前工程时更新界面。"""
+        if process is not self._competition_process:
+            process.deleteLater()
+            return
+
+        process.deleteLater()
+        self._competition_process = None
+        self._competition_project_json_path = None
 
         project_dir = Path(project_json_path).parent
 
@@ -730,6 +754,11 @@ class MainWindow(QMainWindow):
         winner = feedback.get('winner', {})
         scoreboard = feedback.get('scoreboard', [])
         satisfied = feedback.get('requirement_satisfied', False)
+        try:
+            with open(project_json_path, 'r', encoding='utf-8') as f:
+                max_rounds = max(1, int(json.load(f).get('max_rounds') or 1))
+        except Exception:
+            max_rounds = 1
 
         lines = [f'第 {current_round} 轮调优已完成。']
         if winner:
@@ -743,8 +772,23 @@ class MainWindow(QMainWindow):
             lines.append(f'进程异常退出（返回码 {exit_code}）')
         elif satisfied:
             lines.append('停止条件已满足，迭代结束。')
+        elif max_rounds > 0 and current_round >= max_rounds:
+            lines.append(f'已达到最大轮次上限（{max_rounds}），停止迭代。')
 
         message = '\n'.join(lines)
+
+        current_project = self.get_current_project_json_path()
+        try:
+            current_project = (
+                Path(current_project).expanduser().resolve()
+                if current_project else None
+            )
+        except (OSError, RuntimeError):
+            current_project = None
+
+        # 后台工程的完成事件不能污染当前打开工程的聊天、状态或结果面板。
+        if current_project != Path(project_json_path).expanduser().resolve():
+            return
 
         try:
             right_panel = self.right_panel()
@@ -764,57 +808,11 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
-        # 检查 max_rounds 上限
-        try:
-            with open(project_json_path, 'r', encoding='utf-8') as f:
-                max_rounds = json.load(f).get('max_rounds', 0)
-        except Exception:
-            max_rounds = 0
-
-        if not satisfied and exit_code == 0 and (max_rounds <= 0 or current_round < max_rounds):
+        if hasattr(self, 'tuning_result_panel') and self.tuning_result_panel is not None:
             try:
-                right_panel.main_program_panel._append_notice(
-                    f'正在自动启动第 {current_round + 1} 轮仿真...'
-                )
-            except RuntimeError:
-                return
-            QTimer.singleShot(500, lambda: self._start_next_round(current_round + 1))
-        elif max_rounds > 0 and current_round >= max_rounds and not satisfied:
-            try:
-                right_panel.main_program_panel._append_notice(
-                    f'已达到最大轮次上限（{max_rounds}），停止迭代。'
-                )
-            except RuntimeError:
+                self.tuning_result_panel.refresh_from_project()
+            except Exception:
                 pass
-
-    def _start_next_round(self, next_round: int):
-        """生成下一轮策略并自动启动调优。"""
-        project_json_path = self.get_current_project_json_path()
-        if not project_json_path:
-            return
-        project_dir = Path(project_json_path).parent
-        next_profiles = project_dir / 'rounds' / f'round_{next_round:02d}' / 'candidate_profiles.json'
-        right_panel = self.right_panel()
-
-        # 如果策略文件不存在，先生成
-        if not next_profiles.exists():
-            try:
-                if right_panel is not None:
-                    right_panel.main_program_panel._append_debug(
-                        f'正在生成第 {next_round} 轮方案策略（需要调用 LLM）...'
-                    )
-                from Competition.next_round_strategy import generate_next_round_strategy
-                generate_next_round_strategy(project_json_path,
-                                             from_round=next_round - 1,
-                                             to_round=next_round)
-            except Exception as exc:
-                if right_panel is not None:
-                    right_panel.main_program_panel._append_error(
-                        f'无法生成第 {next_round} 轮策略：{exc}')
-                return
-
-        # 直接启动，不弹窗
-        self.run_agent_optimization(round_number=next_round)
 
     def _read_project_open_root(self):
         return str(get_output_root(load_settings()))

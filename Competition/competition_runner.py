@@ -268,6 +268,12 @@ def _safe_int(value: Any) -> int | None:
         return None
 
 
+def _normalize_max_rounds(value: Any) -> int:
+    """Return a finite, positive big-round limit for legacy project files."""
+    parsed = _safe_int(value)
+    return parsed if parsed is not None and parsed >= 1 else 1
+
+
 def stop_conditions_met(score_item: dict[str, Any], stop_conditions: dict[str, Any]) -> bool:
     if not stop_conditions:
         return False
@@ -368,6 +374,7 @@ def run_competition(
 ) -> dict[str, Any]:
     project_json = project_json.expanduser().resolve()
     project_data = load_json_object(project_json)
+    max_rounds = _normalize_max_rounds(project_data.get("max_rounds"))
     write_common_requirement_snapshot(project_json, project_data)
     stop_conditions = project_data.get("stop_conditions")
     if not isinstance(stop_conditions, dict):
@@ -546,10 +553,10 @@ def run_competition(
             round_feedback_path = str(fb_path.resolve())
 
             # ── Step 4: 下一轮策略生成 ─────────────────────────────
-            fb_data = load_json_object(fb_path)
-            max_rounds = int(project_data.get("max_rounds") or 0)
-            at_limit = max_rounds > 0 and round_number >= max_rounds
-            if not at_limit:
+            # 大轮固定运行到 max_rounds。requirement_satisfied 只用于结果展示；
+            # 每个 candidate 内部的小迭代仍由优化器按停止条件提前结束。
+            should_continue = round_number < max_rounds
+            if should_continue:
                 from Competition.next_round_strategy import generate_next_round_strategy  # noqa: E402
                 next_count = int(project_data.get("candidate_count", candidates))
                 next_result = generate_next_round_strategy(
@@ -569,10 +576,13 @@ def run_competition(
                     skip_generate=False,
                     skip_optimize=False,
                     force_init=False,
+                    force_next_round=force_next_round,
                     round_number=round_number + 1,
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            raise RuntimeError(
+                f"failed to finish round {round_number} for project {project_json}: {exc}"
+            ) from exc
 
     scoreboard = [read_score(candidate_dir) for candidate_dir in candidate_dirs]
     winner = None if dry_run else choose_winner(scoreboard)
@@ -696,7 +706,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--skip-optimize", action="store_true")
     parser.add_argument("--force-init", action="store_true")
     parser.add_argument("--round", type=int, default=1, help="轮次编号，默认 1")
-    parser.add_argument("--force-next-round", action="store_true", help="即使停止条件已满足，也强制生成下一轮策略")
+    parser.add_argument(
+        "--force-next-round",
+        action="store_true",
+        help="兼容旧调用；大轮现在始终运行到 max_rounds",
+    )
     args = parser.parse_args(argv)
 
     try:
