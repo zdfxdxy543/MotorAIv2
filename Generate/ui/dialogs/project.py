@@ -176,15 +176,15 @@ class NewProjectDialog(QDialog):
 
         self.max_iter_spin = QSpinBox()
         self.max_iter_spin.setRange(1, 9999)
-        self.max_iter_spin.setValue(5)
+        self.max_iter_spin.setValue(4)
 
         self.candidate_count_spin = QSpinBox()
         self.candidate_count_spin.setRange(1, 16)
-        self.candidate_count_spin.setValue(4)
+        self.candidate_count_spin.setValue(2)
 
         self.max_rounds_spin = QSpinBox()
         self.max_rounds_spin.setRange(1, 50)
-        self.max_rounds_spin.setValue(3)
+        self.max_rounds_spin.setValue(2)
         self.max_rounds_spin.setToolTip('多轮迭代的最大轮次上限，达到后即使未满足停止条件也会停止')
 
         form_layout.addRow('项目保存路径', project_parent_row)
