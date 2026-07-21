@@ -273,31 +273,109 @@ class TuningResultPanel(QWidget):
                 return path
         return None
 
-    @staticmethod
-    def _competition_details(competition_payload):
+    def _competition_details(self, competition_payload):
         if not isinstance(competition_payload, dict):
             return {}
         scoreboard = competition_payload.get('scoreboard')
-        winner = competition_payload.get('winner')
+        scoreboard_list = [item for item in scoreboard if isinstance(item, dict)] if isinstance(scoreboard, list) else []
+
+        # 从 scoreboard 最高分推导 winner_id，而非盲信 competition_run_result 的
+        # winner 字段（winner 只代表最后一轮胜者，可能比前轮最高分低）。
+        best_id = ''
+        best_score = None
+        for item in scoreboard_list:
+            score = item.get('overall_score')
+            if isinstance(score, (int, float)):
+                if best_score is None or float(score) > best_score:
+                    best_score = float(score)
+                    best_id = str(item.get('candidate_id') or '')
+
+        # 检查 iteration_summary.json 是否有跨轮全局最优
+        winner_reason = str(competition_payload.get('winner_reason') or '').strip()
+        iteration_summary_path = self._iteration_summary_path()
+        global_best_round: int | None = None
+        if iteration_summary_path is not None:
+            try:
+                summary = self._read_json(iteration_summary_path)
+            except Exception:
+                summary = {}
+            overview = summary.get('overview') if isinstance(summary, dict) else {}
+            global_cid = str(overview.get('best_score_candidate', '') or '')
+            global_round = overview.get('best_score_round')
+            global_score = overview.get('best_score_overall')
+            if global_cid and isinstance(global_round, int) and isinstance(global_score, (int, float)):
+                if best_score is None or float(global_score) > best_score:
+                    best_score = float(global_score)
+                    best_id = global_cid
+                    global_best_round = global_round
+                    best_round_name = f'第 {global_round} 轮'
+                    if not winner_reason:
+                        winner_reason = f'全局最优来自 {best_round_name} 的 {global_cid}（{best_score:.2f} 分）。'
+                    else:
+                        winner_reason = (
+                            f'[全局最优：{best_round_name} {global_cid}（{best_score:.2f} 分）]\n{winner_reason}'
+                        )
+
+        # ── 当全局最优在历史轮次时，加载该轮的 scoreboard ──────────
+        #    competition_run_result.json 只含最后一轮的 scoreboard，
+        #    历史轮次的数据需从 rounds/round_N/round_feedback.json 读取。
+        if global_best_round is not None:
+            project_dir = self._project_dir()
+            if project_dir is not None:
+                fb_path = project_dir / 'rounds' / f'round_{global_best_round:02d}' / 'round_feedback.json'
+                if fb_path.exists():
+                    try:
+                        fb = self._read_json(fb_path)
+                    except Exception:
+                        fb = {}
+                    fb_scoreboard = fb.get('scoreboard')
+                    fb_candidates = {
+                        c['candidate_id']: c
+                        for c in (fb.get('candidates') or [])
+                        if isinstance(c, dict) and c.get('candidate_id')
+                    }
+                    if isinstance(fb_scoreboard, list) and fb_scoreboard:
+                        enriched = []
+                        for item in fb_scoreboard:
+                            if not isinstance(item, dict):
+                                continue
+                            cid = str(item.get('candidate_id') or '')
+                            cand = fb_candidates.get(cid, {})
+                            fe = cand.get('final_evaluation') if isinstance(cand.get('final_evaluation'), dict) else {}
+                            enriched.append({
+                                'candidate_id': cid,
+                                'overall_score': item.get('overall_score'),
+                                'status': fe.get('status', 'completed'),
+                                'stop_reason': '历史轮次最优',
+                            })
+                        if enriched:
+                            scoreboard_list = enriched
+                            # 重新确认 best_id（以防 round_feedback 与
+                            # iteration_summary 不一致）
+                            enriched.sort(key=lambda x: float(x.get('overall_score') or 0), reverse=True)
+                            best_id = str(enriched[0].get('candidate_id') or best_id)
+
         return {
-            'winner_reason': str(competition_payload.get('winner_reason') or '').strip(),
+            'winner_reason': winner_reason,
             'requirement_satisfied': competition_payload.get('requirement_satisfied'),
-            'scoreboard': [item for item in scoreboard if isinstance(item, dict)] if isinstance(scoreboard, list) else [],
-            'winner_id': str(winner.get('candidate_id') or '') if isinstance(winner, dict) else '',
+            'scoreboard': scoreboard_list,
+            'winner_id': best_id,
         }
+
+    def _iteration_summary_path(self):
+        project_dir = self._project_dir()
+        if project_dir is None:
+            return None
+        path = project_dir / 'rounds' / 'iteration_summary.json'
+        return path if path.exists() else None
 
     def _candidate_result_from_competition(self, competition_payload):
         if not isinstance(competition_payload, dict):
             return None
 
-        winner = competition_payload.get('winner')
-        if isinstance(winner, dict):
-            winner_path = winner.get('tuning_result')
-            if winner_path:
-                path = Path(str(winner_path))
-                if path.exists():
-                    return path
+        best_from_scoreboard: tuple[float, Path] | None = None
 
+        # ── 1. 当前轮 scoreboard 中取最高分 ──────────────────────────
         scoreboard = competition_payload.get('scoreboard')
         if isinstance(scoreboard, list):
             scored_items = []
@@ -318,9 +396,52 @@ class TuningResultPanel(QWidget):
                     fallback_items.append(path)
             if scored_items:
                 scored_items.sort(key=lambda pair: pair[0], reverse=True)
-                return scored_items[0][1]
-            if fallback_items:
+                best_from_scoreboard = scored_items[0]
+            elif fallback_items:
                 return fallback_items[0]
+
+        # ── 2. 检查 iteration_summary.json 是否有跨轮全局最优 ──────
+        #    前几轮的 candidate 可能比当前轮最高分更高，且其
+        #    tuning_result.json 保留在 rounds/ 备份目录中。
+        global_best_path: Path | None = None
+        global_best_score: float | None = None
+        iteration_summary_path = self._iteration_summary_path()
+        if iteration_summary_path is not None:
+            try:
+                summary = self._read_json(iteration_summary_path)
+            except Exception:
+                summary = {}
+            overview = summary.get('overview') if isinstance(summary, dict) else {}
+            candidate_id = str(overview.get('best_score_candidate', '') or '')
+            best_round = overview.get('best_score_round')
+            score_val = overview.get('best_score_overall')
+            if candidate_id and isinstance(best_round, int) and isinstance(score_val, (int, float)):
+                project_dir = self._project_dir()
+                if project_dir is not None:
+                    candidate_tuning = (
+                        project_dir / 'rounds' / f'round_{best_round:02d}'
+                        / 'candidates' / candidate_id / 'log' / 'optimize'
+                        / 'tuning_result.json'
+                    )
+                    if candidate_tuning.exists():
+                        global_best_score = float(score_val)
+                        global_best_path = candidate_tuning
+
+        # ── 3. 选分数更高的返回 ──────────────────────────────────────
+        if global_best_path is not None and global_best_score is not None:
+            if best_from_scoreboard is None or global_best_score > best_from_scoreboard[0]:
+                return global_best_path
+        if best_from_scoreboard is not None:
+            return best_from_scoreboard[1]
+
+        # ── 4. 回退：winner / optimize 产物 ─────────────────────────
+        winner = competition_payload.get('winner')
+        if isinstance(winner, dict):
+            winner_path = winner.get('tuning_result')
+            if winner_path:
+                path = Path(str(winner_path))
+                if path.exists():
+                    return path
 
         optimize_items = competition_payload.get('optimize')
         if isinstance(optimize_items, list):

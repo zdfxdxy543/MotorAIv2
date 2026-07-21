@@ -1,6 +1,6 @@
 {
   "gmp_root": "E:/Related_Github_Project/gmp_pro",
   "output_dir": "E:/Related_Github_Project/Motor_Model.h",
-  "output_dir_motor": "",
+  "output_dir_motor": "E:/Related_Github_Project/gmp_pro/Motor_Model.h",
   "output_dir_board": "E:/Related_Github_Project/Driver_Board.h"
 }
