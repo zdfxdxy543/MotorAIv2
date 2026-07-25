@@ -32,6 +32,8 @@ CHAT_BOTTOM_SAFE_PADDING = 1
 USER_BUBBLE_HORIZONTAL_PADDING = 18
 USER_BUBBLE_VERTICAL_PADDING = 8
 USER_BUBBLE_MIN_HEIGHT = 0
+TYPEWRITER_INTERVAL_MS = 8
+TYPEWRITER_SCROLL_INTERVAL_MS = 32
 
 
 def _font_text_width(metrics, text: str) -> int:
@@ -72,10 +74,20 @@ class ChatInputEdit(QTextEdit):
 
 
 class ChatBubbleWidget(QFrame):
-    def __init__(self, role: str, text: str, parent=None):
+    typingProgress = pyqtSignal()
+    typingFinished = pyqtSignal()
+
+    def __init__(self, role: str, text: str, parent=None, animate: bool = False):
         super().__init__(parent)
         self.role = self._normalize_role(role)
-        self.raw_text = self._display_text(self.role, text or '')
+        self.full_text = self._display_text(self.role, text or '')
+        self._typing_enabled = bool(animate and self.role == 'assistant' and self.full_text)
+        self._typing_index = 0
+        self.raw_text = '' if self._typing_enabled else self.full_text
+        self._typing_timer = QTimer(self)
+        self._typing_timer.setTimerType(Qt.PreciseTimer)
+        self._typing_timer.setInterval(TYPEWRITER_INTERVAL_MS)
+        self._typing_timer.timeout.connect(self._reveal_next_character)
         self.setFrameShape(QFrame.NoFrame)
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
@@ -146,6 +158,49 @@ class ChatBubbleWidget(QFrame):
             self._apply_debug_style(layout)
         else:
             self.role = 'assistant'
+
+    def start_typing(self):
+        if not self._typing_enabled or self._typing_timer.isActive():
+            return
+        self._reveal_next_character()
+        if self._typing_index < len(self.full_text):
+            self._typing_timer.start()
+
+    def is_typing(self) -> bool:
+        return self._typing_enabled
+
+    def finish_typing(self):
+        if not self._typing_enabled:
+            return
+        self._typing_timer.stop()
+        self._typing_index = len(self.full_text)
+        self.raw_text = self.full_text
+        self.body.setText(self.raw_text)
+        self._typing_enabled = False
+        self.typingProgress.emit()
+        self.typingFinished.emit()
+
+    def cancel_typing(self):
+        self._typing_timer.stop()
+        self._typing_enabled = False
+
+    def _reveal_next_character(self):
+        if not self._typing_enabled:
+            self._typing_timer.stop()
+            return
+        if self._typing_index >= len(self.full_text):
+            self.finish_typing()
+            return
+
+        self._typing_index += 1
+        self.raw_text = self.full_text[:self._typing_index]
+        self.body.setText(self.raw_text)
+        self.typingProgress.emit()
+
+        if self._typing_index >= len(self.full_text):
+            self._typing_timer.stop()
+            self._typing_enabled = False
+            self.typingFinished.emit()
 
     @staticmethod
     def _normalize_role(role: str) -> str:
@@ -345,6 +400,12 @@ class ChatStreamWidget(QWidget):
         self.message_rows = []
         self._thinking_row = None
         self._thinking_widget = None
+        self._typing_bubble = None
+        self._typing_queue = []
+        self._typing_scroll_timer = QTimer(self)
+        self._typing_scroll_timer.setSingleShot(True)
+        self._typing_scroll_timer.setInterval(TYPEWRITER_SCROLL_INTERVAL_MS)
+        self._typing_scroll_timer.timeout.connect(self._scroll_to_bottom_now)
         self.setObjectName('chatStreamWidget')
         self.setAttribute(Qt.WA_StyledBackground, True)
         t = current_theme()
@@ -378,6 +439,13 @@ class ChatStreamWidget(QWidget):
         return self.container_layout.count()
 
     def clear_messages(self):
+        if self._typing_bubble is not None:
+            self._typing_bubble.cancel_typing()
+            self._typing_bubble = None
+        for bubble in self._typing_queue:
+            bubble.cancel_typing()
+        self._typing_queue.clear()
+        self._typing_scroll_timer.stop()
         for role, _row, content in self.message_rows:
             if role == '__thinking__' and hasattr(content, 'stop'):
                 content.stop()
@@ -395,13 +463,16 @@ class ChatStreamWidget(QWidget):
                 widget.deleteLater()
         self.container_layout.setAlignment(Qt.AlignTop)
 
-    def append_message(self, role: str, text: str):
+    def append_message(self, role: str, text: str, animate: bool = False):
         role = ChatBubbleWidget._normalize_role(role)
         if role == 'debug' and self._append_to_last_debug(text):
             self.messages.append((role, text))
             self._update_bubble_widths()
             self._scroll_to_bottom()
             return
+
+        if role == 'user':
+            self._finish_all_typing()
 
         self.messages.append((role, text))
 
@@ -412,7 +483,12 @@ class ChatStreamWidget(QWidget):
         row_layout.setContentsMargins(0, 0, 0, 0)
         row_layout.setSpacing(0)
 
-        bubble = ChatBubbleWidget(role, text)
+        bubble = ChatBubbleWidget(
+            role,
+            text,
+            animate=bool(animate and role == 'assistant'),
+        )
+        should_animate = bubble.is_typing()
 
         if role == 'user':
             row_layout.addStretch(1)
@@ -433,6 +509,49 @@ class ChatStreamWidget(QWidget):
         self.container_layout.insertWidget(self._message_insert_index(), row)
         self.message_rows.append((role, row, bubble))
         self._update_bubble_widths()
+        self._scroll_to_bottom()
+        if should_animate:
+            bubble.typingProgress.connect(
+                lambda current=bubble: self._on_typing_progress(current)
+            )
+            bubble.typingFinished.connect(
+                lambda current=bubble: self._on_typing_finished(current)
+            )
+            if self._typing_bubble is None:
+                self._start_typing(bubble)
+            else:
+                self._typing_queue.append(bubble)
+
+    def _start_typing(self, bubble: ChatBubbleWidget):
+        self._typing_bubble = bubble
+        bubble.start_typing()
+
+    def _finish_all_typing(self):
+        current = self._typing_bubble
+        queued = list(self._typing_queue)
+        self._typing_queue.clear()
+        if current is not None:
+            current.finish_typing()
+        for bubble in queued:
+            bubble.finish_typing()
+
+    def _on_typing_progress(self, bubble: ChatBubbleWidget):
+        bubble.updateGeometry()
+        row = bubble.parentWidget()
+        if row is not None:
+            row.updateGeometry()
+        self.container_layout.activate()
+        if not self._typing_scroll_timer.isActive():
+            self._typing_scroll_timer.start()
+
+    def _on_typing_finished(self, bubble: ChatBubbleWidget):
+        if self._typing_bubble is bubble:
+            self._typing_bubble = None
+            while self._typing_queue:
+                next_bubble = self._typing_queue.pop(0)
+                if next_bubble.is_typing():
+                    self._start_typing(next_bubble)
+                    break
         self._scroll_to_bottom()
 
     def _append_to_last_debug(self, text: str) -> bool:

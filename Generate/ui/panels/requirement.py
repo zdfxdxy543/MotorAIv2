@@ -9,7 +9,8 @@ from PyQt5.QtWidgets import (
     QWidget,
     QVBoxLayout,
 )
-from PyQt5.QtCore import Qt, QDateTime
+from PyQt5.QtCore import Qt, QDateTime, QSignalBlocker
+from contextlib import contextmanager
 import json
 import math
 from pathlib import Path
@@ -29,6 +30,7 @@ class RequirementPanel(QWidget):
     def __init__(self, project_json_getter=None, parent=None):
         super().__init__(parent)
         self.chat_worker = None
+        self._callback_project_json_path = None
         self.project_json_getter = project_json_getter
         self.chat_history = []
         self.completion_callback = None
@@ -79,6 +81,7 @@ class RequirementPanel(QWidget):
             f'border-radius:{RADIUS_CARD}px;}}'
             f'QHeaderView::section{{background:{t.header_bg};padding:4px;}}'
         )
+        self.param_table.itemChanged.connect(self._on_target_value_changed)
         param_layout.addWidget(self.param_table)
 
         input_bar = QWidget()
@@ -112,7 +115,18 @@ class RequirementPanel(QWidget):
 
     def _append_chat(self, role: str, text: str, echo_external: bool = True):
         role = self._normalize_chat_role(role)
-        self.chat_view.append_message(role, text)
+        target_project = self._project_json_path()
+        if target_project and not self._same_project(
+            target_project,
+            self._current_project_json_path(),
+        ):
+            self._append_chat_to_project_record(target_project, role, text)
+            callback_owner = getattr(self.external_chat_callback, '__self__', None)
+            append_for_project = getattr(callback_owner, 'append_chat_for_project', None)
+            if echo_external and callable(append_for_project):
+                append_for_project(role, text, target_project)
+            return
+        self.chat_view.append_message(role, text, animate=(role == 'assistant'))
         if role != 'debug':
             self.chat_history.append({
                 'role': role,
@@ -152,18 +166,19 @@ class RequirementPanel(QWidget):
         self._set_status_text(f'状态：{text}')
 
     def _set_status_text(self, text: str):
+        if not self._project_context_is_current():
+            return
         self.status_label.setText(text)
         if callable(self.external_status_callback):
             self.external_status_callback(text)
 
     def _project_folder(self):
-        if callable(self.project_json_getter):
-            pj = self.project_json_getter()
-            if pj:
-                try:
-                    return Path(pj).parent
-                except Exception:
-                    pass
+        pj = self._project_json_path()
+        if pj:
+            try:
+                return Path(pj).parent
+            except Exception:
+                pass
         return None
 
     def _save_chat_record(self):
@@ -284,16 +299,87 @@ class RequirementPanel(QWidget):
             ),
             self,
         )
+        self._bind_worker_to_project(self.chat_worker)
         self.chat_worker.success.connect(self.on_chat_success)
         self.chat_worker.failure.connect(self.on_chat_failure)
         self.chat_worker.finished.connect(self.on_chat_finished)
         self.chat_worker.start()
         return True
 
-    def _project_json_path(self):
+    def _current_project_json_path(self):
         if callable(self.project_json_getter):
             return self.project_json_getter()
         return None
+
+    def _project_json_path(self):
+        return self._callback_project_json_path or self._current_project_json_path()
+
+    @staticmethod
+    def _canonical_project_path(project_json):
+        if not project_json:
+            return None
+        try:
+            return Path(project_json).expanduser().resolve()
+        except (OSError, TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _same_project(cls, first, second) -> bool:
+        first_path = cls._canonical_project_path(first)
+        second_path = cls._canonical_project_path(second)
+        return first_path is not None and first_path == second_path
+
+    def _project_context_is_current(self) -> bool:
+        if self._callback_project_json_path is None:
+            return True
+        return self._same_project(
+            self._callback_project_json_path,
+            self._current_project_json_path(),
+        )
+
+    def _bind_worker_to_project(self, worker):
+        worker.chat_project_json_path = self._canonical_project_path(
+            self._project_json_path()
+        )
+
+    @contextmanager
+    def _worker_project_context(self):
+        sender = self.sender()
+        project_json = getattr(sender, 'chat_project_json_path', None)
+        previous = self._callback_project_json_path
+        self._callback_project_json_path = project_json or previous
+        try:
+            yield sender
+        finally:
+            self._callback_project_json_path = previous
+
+    def _append_chat_to_project_record(self, project_json, role: str, text: str):
+        if role == 'debug':
+            return
+        project_path = self._canonical_project_path(project_json)
+        if project_path is None:
+            return
+        record_path = project_path.parent / 'record.json'
+        try:
+            data = {}
+            if record_path.exists():
+                with open(record_path, 'r', encoding='utf-8') as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    data = loaded
+            history = data.get('requirement')
+            if not isinstance(history, list):
+                history = []
+            history.append({
+                'role': role,
+                'text': text,
+                'timestamp': QDateTime.currentDateTime().toString(Qt.ISODate),
+            })
+            data['requirement'] = history
+            with open(record_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
 
     def _ctl_main_paths(self):
         project_json = self._project_json_path()
@@ -451,22 +537,25 @@ class RequirementPanel(QWidget):
     }
 
     def on_chat_success(self, reply: str):
-        self.chat_view.hide_thinking()
-        self._append_chat('assistant', reply)
-        self._write_requirement_to_project_json(reply)
-        self._set_progress('正在生成任务类型...')
-        self._generate_task_type()
-        self._set_progress('正在生成信号、目标和事件...')
-        self._generate_signals_targets_events()
-        self._set_progress('正在生成评价指标...')
-        self._generate_metrics()
-        self._set_progress('正在生成目标参数...')
-        self._generate_targets_from_metrics()
-        self._set_progress('正在生成停止条件...')
-        self._generate_stop_conditions()
-        self._set_status_text('状态：需求指标已完善')
-        if callable(self.completion_callback):
-            self.completion_callback()
+        with self._worker_project_context():
+            project_is_current = self._project_context_is_current()
+            if project_is_current:
+                self.chat_view.hide_thinking()
+            self._append_chat('assistant', reply)
+            self._write_requirement_to_project_json(reply)
+            self._set_progress('正在生成任务类型...')
+            self._generate_task_type()
+            self._set_progress('正在生成信号、目标和事件...')
+            self._generate_signals_targets_events()
+            self._set_progress('正在生成评价指标...')
+            self._generate_metrics()
+            self._set_progress('正在生成目标参数...')
+            self._generate_targets_from_metrics()
+            self._set_progress('正在生成停止条件...')
+            self._generate_stop_conditions()
+            self._set_status_text('状态：需求指标已完善')
+            if project_is_current and callable(self.completion_callback):
+                self.completion_callback()
 
     def _generate_task_type(self):
         project_json = self._project_json_path()
@@ -1004,24 +1093,26 @@ class RequirementPanel(QWidget):
             self._append_error('目标参数生成失败。', str(exc))
 
     def _update_param_table(self, targets):
-        self.param_table.setRowCount(len(targets))
-        row = 0
-        for signal, target_info in targets.items():
-            signal_item = QTableWidgetItem(signal)
-            signal_item.setFlags(signal_item.flags() & ~Qt.ItemIsEditable)
-            
-            target_value_item = QTableWidgetItem(str(target_info.get('target_value', 0.0)))
-            target_value_item.setData(Qt.UserRole, signal)
-            
-            unit_item = QTableWidgetItem(target_info.get('unit', ''))
-            unit_item.setFlags(unit_item.flags() & ~Qt.ItemIsEditable)
-            
-            self.param_table.setItem(row, 0, signal_item)
-            self.param_table.setItem(row, 1, target_value_item)
-            self.param_table.setItem(row, 2, unit_item)
-            row += 1
-        
-        self.param_table.itemChanged.connect(self._on_target_value_changed)
+        signal_blocker = QSignalBlocker(self.param_table)
+        try:
+            self.param_table.setRowCount(len(targets))
+            row = 0
+            for signal, target_info in targets.items():
+                signal_item = QTableWidgetItem(signal)
+                signal_item.setFlags(signal_item.flags() & ~Qt.ItemIsEditable)
+
+                target_value_item = QTableWidgetItem(str(target_info.get('target_value', 0.0)))
+                target_value_item.setData(Qt.UserRole, signal)
+
+                unit_item = QTableWidgetItem(target_info.get('unit', ''))
+                unit_item.setFlags(unit_item.flags() & ~Qt.ItemIsEditable)
+
+                self.param_table.setItem(row, 0, signal_item)
+                self.param_table.setItem(row, 1, target_value_item)
+                self.param_table.setItem(row, 2, unit_item)
+                row += 1
+        finally:
+            del signal_blocker
 
     def _on_target_value_changed(self, item):
         if item.column() != 1:
@@ -1120,12 +1211,16 @@ class RequirementPanel(QWidget):
             self._append_error('停止条件生成失败。', str(exc))
 
     def on_chat_failure(self, error_text: str):
-        self.chat_view.hide_thinking()
-        self._append_error('对话失败，请检查设置与网络。', error_text)
-        self._set_status_text('状态：对话失败，请检查设置与网络')
+        with self._worker_project_context():
+            if self._project_context_is_current():
+                self.chat_view.hide_thinking()
+            self._append_error('对话失败，请检查设置与网络。', error_text)
+            self._set_status_text('状态：对话失败，请检查设置与网络')
 
     def on_chat_finished(self):
-        self.chat_view.hide_thinking()
+        with self._worker_project_context():
+            if self._project_context_is_current():
+                self.chat_view.hide_thinking()
         self.send_btn.setEnabled(True)
         if callable(self.external_finished_callback):
             self.external_finished_callback()
