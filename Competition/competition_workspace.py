@@ -752,6 +752,8 @@ def init_candidates(
     source_root = template_root or project_root
     source_src = source_root / "src"
     source_simulate = source_root / "project" / "simulate"
+    source_f280049c = source_root / "project" / "f280049c"
+    source_hardware = source_root / "project" / "f280049c_TIBoard_motorai"
 
     if candidate_count < 1:
         raise ValueError("candidate_count must be >= 1")
@@ -772,6 +774,18 @@ def init_candidates(
 
         copy_required_directory(source_src, paths.src, force=force, project_root=project_root)
         copy_required_directory(source_simulate, paths.simulate, force=force, project_root=project_root)
+        copy_required_directory(
+            source_f280049c,
+            paths.root / "project" / source_f280049c.name,
+            force=force,
+            project_root=project_root,
+        )
+        copy_required_directory(
+            source_hardware,
+            paths.root / "project" / source_hardware.name,
+            force=force,
+            project_root=project_root,
+        )
 
         for log_dir in (
             paths.log_generate,

@@ -40,7 +40,7 @@
 #include <ctl/component/hardware_preset/pmsm_motor/SM060R20B30MNAD.h>
 
 // invoke motor controller parameters
-#include <MONKEY_BOARD.h>
+#include <ctl\component\hardware_preset\inverter_3ph\GMP_3PH_2136SINV_DUAL_TMPL.h>
 
 ///////////////////////////////////////////////////////////
 // Encoder Properties
@@ -59,7 +59,7 @@
 // Controller Base value
 
 // DC bus voltage
-#define CTRL_DCBUS_VOLTAGE (80.0f)
+#define CTRL_DCBUS_VOLTAGE (48.0f)
 
 // phase voltage base, SVPWM modulation
 #define CTRL_VOLTAGE_BASE (CTRL_DCBUS_VOLTAGE / 1.73205081f)
