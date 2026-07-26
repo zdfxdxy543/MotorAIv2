@@ -11,6 +11,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, QDateTime, QSize, QThread, pyqtSignal
 from PyQt5.QtGui import QColor, QMovie
+from contextlib import contextmanager
 import json
 from pathlib import Path
 
@@ -447,25 +448,46 @@ class IntentConfirmCard(QFrame):
         self.cancel_btn.setObjectName('ghostButton')
         self.cancel_btn.setStyleSheet(ghost_button_qss())
 
-        self.confirm_btn.clicked.connect(lambda: self._resolve(self._on_confirm))
+        self.resolution_label = QLabel()
+        self.resolution_label.setStyleSheet(
+            f'color:{current_theme().muted};font-weight:600;'
+        )
+        self.resolution_label.hide()
+
+        self.confirm_btn.clicked.connect(
+            lambda: self._resolve(self._on_confirm, f'已选择：{confirm_label}')
+        )
         if alternative_label:
-            self.alternative_btn.clicked.connect(lambda: self._resolve(self._on_alternative))
-        self.cancel_btn.clicked.connect(lambda: self._resolve(self._on_cancel))
+            self.alternative_btn.clicked.connect(
+                lambda: self._resolve(
+                    self._on_alternative,
+                    f'已选择：{alternative_label}',
+                )
+            )
+        self.cancel_btn.clicked.connect(
+            lambda: self._resolve(self._on_cancel, '已取消')
+        )
 
         button_layout.addWidget(self.confirm_btn)
         if alternative_label:
             button_layout.addWidget(self.alternative_btn)
         button_layout.addWidget(self.cancel_btn)
         layout.addWidget(button_row)
+        layout.addWidget(self.resolution_label)
 
-    def _resolve(self, callback):
+    def _resolve(self, callback, resolution_text: str):
         if self._resolved:
             return
+        self.set_resolved(resolution_text)
+        if callable(callback):
+            callback()
+
+    def set_resolved(self, resolution_text: str):
         self._resolved = True
         for button in (self.confirm_btn, self.alternative_btn, self.cancel_btn):
             button.setEnabled(False)
-        if callable(callback):
-            callback()
+        self.resolution_label.setText(resolution_text)
+        self.resolution_label.show()
 
 
 class MainProgramPanel(QWidget):
@@ -476,6 +498,7 @@ class MainProgramPanel(QWidget):
         self.route_worker = None
         self.program_worker = None
         self._chat_task = None
+        self._callback_project_json_path = None
         self._pending_route_text = ''
         self._pending_program_text = ''
         self._program_requirement_before_refine = ''
@@ -806,6 +829,8 @@ class MainProgramPanel(QWidget):
         self._auto_start_tuning_if_ready(force=False)
 
     def _set_status_text(self, text: str):
+        if not self._project_context_is_current():
+            return
         self._status_text = text
 
     def _set_program_input_mode(self):
@@ -866,20 +891,30 @@ class MainProgramPanel(QWidget):
 
     def _start_program_requirement_refinement(self, text: str, append_user: bool = True):
         self._pending_program_text = text
-        self._program_requirement_before_refine = self.current_requirement
+        project_is_current = self._project_context_is_current()
+        if project_is_current:
+            self._program_requirement_before_refine = self.current_requirement
+        else:
+            project_data = self._project_data()
+            self._program_requirement_before_refine = str(
+                project_data.get('objective_text') or project_data.get('objective') or ''
+            ).strip()
         if append_user:
             self._append_chat('user', text)
         self._apply_candidate_profile_overrides(text)
 
-        if self._welcome_is_active():
+        if project_is_current and self._welcome_is_active():
             self.show_main_content()
-        self._set_progress('正在整理控制程序需求...')
-        self.chat_view.show_thinking()
-        self._set_status_text('状态：对话处理中...')
-        self.send_btn.setEnabled(False)
+        if project_is_current:
+            self._set_progress('正在整理控制程序需求...')
+            self.chat_view.show_thinking()
+            self._set_status_text('状态：对话处理中...')
+            self.send_btn.setEnabled(False)
         self._chat_task = 'program_refine'
 
         self.chat_worker = ChatWorker(text, self._program_requirement_prompt(), self)
+        self._bind_worker_to_project(self.chat_worker)
+        self.chat_worker.chat_task = self._chat_task
         self.chat_worker.success.connect(self.on_chat_success)
         self.chat_worker.failure.connect(self.on_chat_failure)
         self.chat_worker.finished.connect(self.on_chat_finished)
@@ -906,9 +941,16 @@ class MainProgramPanel(QWidget):
 
     def _append_chat(self, role: str, text: str):
         role = self._normalize_chat_role(role)
+        target_project = self._project_json_path()
+        if target_project and not self._same_project(
+            target_project,
+            self._current_project_json_path(),
+        ):
+            self._append_chat_to_project_record(target_project, role, text)
+            return
         if role == 'assistant':
             self.chat_view.hide_thinking()
-        self.chat_view.append_message(role, text)
+        self.chat_view.append_message(role, text, animate=(role == 'assistant'))
         if role != 'debug':
             self.chat_history.append({
                 'role': role,
@@ -916,6 +958,14 @@ class MainProgramPanel(QWidget):
                 'timestamp': QDateTime.currentDateTime().toString(Qt.ISODate)
             })
             self._save_chat_record()
+
+    def append_chat_for_project(self, role: str, text: str, project_json):
+        previous = self._callback_project_json_path
+        self._callback_project_json_path = self._canonical_project_path(project_json)
+        try:
+            self._append_chat(role, text)
+        finally:
+            self._callback_project_json_path = previous
 
     @staticmethod
     def _normalize_chat_role(role: str) -> str:
@@ -946,8 +996,16 @@ class MainProgramPanel(QWidget):
         self._set_status_text(f'状态：{text}')
 
     def _flow_state(self):
+        program_requirement = self.current_requirement
+        if not self._project_context_is_current():
+            project_data = self._project_data()
+            program_requirement = str(
+                project_data.get('objective_text')
+                or project_data.get('objective')
+                or ''
+            ).strip()
         return {
-            'program_requirement': self.current_requirement,
+            'program_requirement': program_requirement,
             'program_generated': self._has_generated_program(),
             'load_curve_saved': self._has_load_curve_saved(),
             'metrics_ready': self._has_metrics_ready(),
@@ -963,23 +1021,26 @@ class MainProgramPanel(QWidget):
         self._set_progress('正在判断对话意图...')
         self.send_btn.setEnabled(False)
         self.route_worker = FlowRouteWorker(text, self._flow_state(), list(self.chat_history), self)
+        self._bind_worker_to_project(self.route_worker)
         self.route_worker.routed.connect(self._on_route_success)
         self.route_worker.failure.connect(self._on_route_failure)
         self.route_worker.finished.connect(self._on_route_finished)
         self.route_worker.start()
 
     def _on_route_success(self, route: dict):
-        text = self._pending_route_text
-        self._pending_route_text = ''
-        self._handle_user_route(text, route)
+        with self._worker_project_context():
+            text = self._pending_route_text
+            self._pending_route_text = ''
+            self._handle_user_route(text, route)
 
     def _on_route_failure(self, error_text: str):
-        text = self._pending_route_text
-        self._pending_route_text = ''
-        fallback = self._fallback_route(text)
-        self._append_notice('意图判断暂时不可用，已使用本地规则继续。')
-        self._append_debug(f'意图判断失败：{error_text}')
-        self._handle_user_route(text, fallback)
+        with self._worker_project_context():
+            text = self._pending_route_text
+            self._pending_route_text = ''
+            fallback = self._fallback_route(text)
+            self._append_notice('意图判断暂时不可用，已使用本地规则继续。')
+            self._append_debug(f'意图判断失败：{error_text}')
+            self._handle_user_route(text, fallback)
 
     def _on_route_finished(self):
         if not self._assistant_busy():
@@ -1003,6 +1064,17 @@ class MainProgramPanel(QWidget):
     def _handle_user_route(self, text: str, route: dict):
         action = (route or {}).get('action') or ACTION_CLARIFY
         reply = (route or {}).get('reply') or ''
+
+        if not self._project_context_is_current() and action not in {
+            ACTION_ANSWER_QUESTION,
+            ACTION_REVISE_PROGRAM,
+        }:
+            self._append_chat('user', text)
+            self._append_chat(
+                'assistant',
+                reply or '已识别这项操作。请切回该项目后重新确认，以免影响当前打开的项目。',
+            )
+            return
 
         if self._needs_intent_confirmation(action):
             self._append_chat('user', text)
@@ -1074,7 +1146,13 @@ class MainProgramPanel(QWidget):
             return True
         return action == ACTION_REVISE_PROGRAM and self._has_generated_program()
 
-    def _append_intent_confirm_card(self, text: str, route: dict):
+    def _append_intent_confirm_card(
+        self,
+        text: str,
+        route: dict,
+        history_item: dict | None = None,
+    ):
+        route = dict(route or {})
         action = (route or {}).get('action') or ACTION_CLARIFY
         intent_title = self._intent_title(action)
         summary = self._intent_summary(action, text)
@@ -1082,17 +1160,82 @@ class MainProgramPanel(QWidget):
         alternative_action = self._intent_alternative_action(action)
         alternative_label = self._intent_alternative_label(action)
 
+        if history_item is None:
+            history_item = {
+                'kind': 'intent_confirm',
+                'text': text,
+                'route': route,
+                'intent_title': intent_title,
+                'summary': summary,
+                'confirm_label': confirm_label,
+                'alternative_action': alternative_action,
+                'alternative_label': alternative_label,
+                'status': 'pending',
+                'timestamp': QDateTime.currentDateTime().toString(Qt.ISODate),
+            }
+            self.chat_history.append(history_item)
+            self._save_chat_record()
+        else:
+            intent_title = str(history_item.get('intent_title') or intent_title)
+            summary = str(history_item.get('summary') or summary)
+            confirm_label = str(history_item.get('confirm_label') or confirm_label)
+            alternative_action = str(
+                history_item.get('alternative_action') or alternative_action
+            )
+            alternative_label = str(
+                history_item.get('alternative_label') or alternative_label
+            )
+
         card = IntentConfirmCard(
             intent_title=intent_title,
             summary=summary,
             confirm_label=confirm_label,
             alternative_label=alternative_label,
-            on_confirm=lambda: self._execute_confirmed_route(text, action),
-            on_alternative=lambda: self._execute_confirmed_route(text, alternative_action),
-            on_cancel=lambda: self._cancel_intent_confirmation(),
+            on_confirm=lambda: self._resolve_intent_confirmation(
+                history_item,
+                'confirmed',
+                text,
+                action,
+            ),
+            on_alternative=lambda: self._resolve_intent_confirmation(
+                history_item,
+                'alternative',
+                text,
+                alternative_action,
+            ),
+            on_cancel=lambda: self._resolve_intent_confirmation(
+                history_item,
+                'cancelled',
+                text,
+                None,
+            ),
         )
+        status = str(history_item.get('status') or 'pending')
+        if status == 'confirmed':
+            card.set_resolved(f'已选择：{confirm_label}')
+        elif status == 'alternative':
+            card.set_resolved(f'已选择：{alternative_label}')
+        elif status == 'cancelled':
+            card.set_resolved('已取消')
         self.chat_view.append_widget(card, width_ratio=0.78)
-        self._set_status_text('状态：等待确认意图')
+        if status == 'pending':
+            self._set_status_text('状态：等待确认意图')
+
+    def _resolve_intent_confirmation(
+        self,
+        history_item: dict,
+        status: str,
+        text: str,
+        selected_action: str | None,
+    ):
+        history_item['status'] = status
+        if selected_action:
+            history_item['selected_action'] = selected_action
+        self._save_chat_record()
+        if status == 'cancelled':
+            self._cancel_intent_confirmation()
+            return
+        self._execute_confirmed_route(text, selected_action or ACTION_CLARIFY)
 
     def _intent_title(self, action: str) -> str:
         titles = {
@@ -1182,11 +1325,16 @@ class MainProgramPanel(QWidget):
         )
 
     def _start_answer_response(self, text: str):
-        self._set_progress('正在回答问题...')
-        self.send_btn.setEnabled(False)
+        project_is_current = self._project_context_is_current()
+        if project_is_current:
+            self._set_progress('正在回答问题...')
+            self.send_btn.setEnabled(False)
         self._chat_task = 'answer'
-        self.chat_view.show_thinking()
+        if project_is_current:
+            self.chat_view.show_thinking()
         self.chat_worker = ChatWorker(text, self._answer_prompt(), self)
+        self._bind_worker_to_project(self.chat_worker)
+        self.chat_worker.chat_task = self._chat_task
         self.chat_worker.success.connect(self.on_chat_success)
         self.chat_worker.failure.connect(self.on_chat_failure)
         self.chat_worker.finished.connect(self.on_chat_finished)
@@ -1231,10 +1379,80 @@ class MainProgramPanel(QWidget):
             self.send_btn.setEnabled(False)
             self.input_edit.clear()
 
-    def _project_json_path(self):
+    def _current_project_json_path(self):
         if callable(self.project_json_getter):
             return self.project_json_getter()
         return None
+
+    def _project_json_path(self):
+        return self._callback_project_json_path or self._current_project_json_path()
+
+    @staticmethod
+    def _canonical_project_path(project_json):
+        if not project_json:
+            return None
+        try:
+            return Path(project_json).expanduser().resolve()
+        except (OSError, TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _same_project(cls, first, second) -> bool:
+        first_path = cls._canonical_project_path(first)
+        second_path = cls._canonical_project_path(second)
+        return first_path is not None and first_path == second_path
+
+    def _project_context_is_current(self) -> bool:
+        if self._callback_project_json_path is None:
+            return True
+        return self._same_project(
+            self._callback_project_json_path,
+            self._current_project_json_path(),
+        )
+
+    def _bind_worker_to_project(self, worker):
+        worker.chat_project_json_path = self._canonical_project_path(
+            self._project_json_path()
+        )
+
+    @contextmanager
+    def _worker_project_context(self):
+        sender = self.sender()
+        project_json = getattr(sender, 'chat_project_json_path', None)
+        previous = self._callback_project_json_path
+        self._callback_project_json_path = project_json or previous
+        try:
+            yield sender
+        finally:
+            self._callback_project_json_path = previous
+
+    def _append_chat_to_project_record(self, project_json, role: str, text: str):
+        if role == 'debug':
+            return
+        project_path = self._canonical_project_path(project_json)
+        if project_path is None:
+            return
+        record_path = project_path.parent / 'record.json'
+        try:
+            data = {}
+            if record_path.exists():
+                with open(record_path, 'r', encoding='utf-8') as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    data = loaded
+            history = data.get('main_program')
+            if not isinstance(history, list):
+                history = []
+            history.append({
+                'role': role,
+                'text': text,
+                'timestamp': QDateTime.currentDateTime().toString(Qt.ISODate),
+            })
+            data['main_program'] = history
+            with open(record_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
 
     def _project_data(self):
         project_json = self._project_json_path()
@@ -1551,25 +1769,31 @@ class MainProgramPanel(QWidget):
         return '\n'.join(plan_lines)
 
     def on_chat_success(self, reply: str):
-        self.chat_view.hide_thinking()
-        if self._chat_task == 'answer':
+        with self._worker_project_context() as worker:
+            project_is_current = self._project_context_is_current()
+            if project_is_current:
+                self.chat_view.hide_thinking()
+            chat_task = getattr(worker, 'chat_task', self._chat_task)
+            if chat_task == 'answer':
+                self._append_chat('assistant', reply)
+                self._set_status_text('状态：已回答')
+                return
+
+            if chat_task == 'program_refine' and self._is_requirement_clarification(reply):
+                if project_is_current:
+                    self.current_requirement = self._program_requirement_before_refine
+                self._append_chat('assistant', self._clean_requirement_clarification(reply))
+                self._set_status_text('状态：等待补充原始需求')
+                return
+
             self._append_chat('assistant', reply)
-            self._set_status_text('状态：已回答')
-            return
-
-        if self._chat_task == 'program_refine' and self._is_requirement_clarification(reply):
-            self.current_requirement = self._program_requirement_before_refine
-            self._append_chat('assistant', self._clean_requirement_clarification(reply))
-            self._set_status_text('状态：等待补充原始需求')
-            return
-
-        self._append_chat('assistant', reply)
-        self._apply_candidate_profile_overrides(reply)
-        self.current_requirement = reply
-        self._update_project_json_requirement(reply)
-        self._append_chat('assistant', self._candidate_plan_text())
-        self._set_program_input_mode()
-        self._set_status_text('状态：等待确认生成程序')
+            self._apply_candidate_profile_overrides(reply)
+            self._update_project_json_requirement(reply)
+            self._append_chat('assistant', self._candidate_plan_text())
+            if project_is_current:
+                self.current_requirement = reply
+                self._set_program_input_mode()
+                self._set_status_text('状态：等待确认生成程序')
 
     @staticmethod
     def _is_requirement_clarification(reply: str) -> bool:
@@ -1595,12 +1819,16 @@ class MainProgramPanel(QWidget):
         return text or '请描述原始应用场景或控制目标，例如吸尘器驱动、伺服位置控制、电流环控制或调速驱动。'
 
     def on_chat_failure(self, error_text: str):
-        self.chat_view.hide_thinking()
-        self._append_error('对话失败，请检查设置与网络。', error_text)
-        self._set_status_text('状态：对话失败，请检查设置与网络')
+        with self._worker_project_context():
+            if self._project_context_is_current():
+                self.chat_view.hide_thinking()
+            self._append_error('对话失败，请检查设置与网络。', error_text)
+            self._set_status_text('状态：对话失败，请检查设置与网络')
 
     def on_chat_finished(self):
-        self.chat_view.hide_thinking()
+        with self._worker_project_context():
+            if self._project_context_is_current():
+                self.chat_view.hide_thinking()
         self._chat_task = None
         if not self._assistant_busy():
             self.send_btn.setEnabled(True)
@@ -1644,30 +1872,49 @@ class MainProgramPanel(QWidget):
             llm_config=llm_config,
             parent=self,
         )
-        self.program_worker.progress.connect(self._set_progress)
-        self.program_worker.debug.connect(self._append_debug)
+        self._bind_worker_to_project(self.program_worker)
+        self.program_worker.progress.connect(self._on_program_generation_progress)
+        self.program_worker.debug.connect(self._on_program_generation_debug)
         self.program_worker.success.connect(self._on_program_generation_success)
         self.program_worker.failure.connect(self._on_program_generation_failure)
         self.program_worker.finished.connect(self._on_program_generation_finished)
         self.program_worker.start()
 
+    def _on_program_generation_progress(self, text: str):
+        with self._worker_project_context():
+            self._set_progress(text)
+
+    def _on_program_generation_debug(self, text: str):
+        with self._worker_project_context():
+            self._append_debug(text)
+
     def _on_program_generation_success(self, result: dict):
-        self._set_status_text('状态：生成完成')
-        self._append_debug('所有 candidate 控制器程序已生成。根目录 src 未被修改。')
-        if callable(self.structure_refresh_callback):
-            self.structure_refresh_callback()
-        self.show_load_curve_card()
+        with self._worker_project_context():
+            if not self._project_context_is_current():
+                self._append_chat(
+                    'assistant',
+                    '控制程序已生成完成。切回该项目后可以继续设置负载曲线。',
+                )
+                return
+            self._set_status_text('状态：生成完成')
+            self._append_debug('所有 candidate 控制器程序已生成。根目录 src 未被修改。')
+            if callable(self.structure_refresh_callback):
+                self.structure_refresh_callback()
+            self.show_load_curve_card()
 
     def _on_program_generation_failure(self, error_text: str):
-        self._set_status_text('状态：调用失败')
-        self._append_error('生成过程中发生异常。', error_text)
+        with self._worker_project_context():
+            self._set_status_text('状态：调用失败')
+            self._append_error('生成过程中发生异常。', error_text)
 
     def _on_program_generation_finished(self):
-        self.chat_view.hide_thinking()
+        with self._worker_project_context() as worker:
+            if self._project_context_is_current():
+                self.chat_view.hide_thinking()
         self.send_btn.setEnabled(True)
         self.run_btn.setEnabled(True)
-        worker = self.program_worker
-        self.program_worker = None
+        if worker is self.program_worker:
+            self.program_worker = None
         if worker is not None:
             worker.deleteLater()
 
@@ -1716,13 +1963,12 @@ class MainProgramPanel(QWidget):
                 self._append_error(f'启动第 {next_round} 轮调优失败：{exc}')
 
     def _project_folder(self):
-        if callable(self.project_json_getter):
-            pj = self.project_json_getter()
-            if pj:
-                try:
-                    return Path(pj).parent
-                except Exception:
-                    pass
+        pj = self._project_json_path()
+        if pj:
+            try:
+                return Path(pj).parent
+            except Exception:
+                pass
         return None
 
     def _save_chat_record(self):
@@ -1759,8 +2005,22 @@ class MainProgramPanel(QWidget):
             with open(record_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             self.chat_history = data.get('main_program', [])
-            for msg in self.chat_history:
-                self.chat_view.append_message(msg.get('role', 'system'), msg.get('text', ''))
+            if not isinstance(self.chat_history, list):
+                self.chat_history = []
+            for item in self.chat_history:
+                if not isinstance(item, dict):
+                    continue
+                if item.get('kind') == 'intent_confirm':
+                    self._append_intent_confirm_card(
+                        str(item.get('text') or ''),
+                        item.get('route') if isinstance(item.get('route'), dict) else {},
+                        history_item=item,
+                    )
+                    continue
+                self.chat_view.append_message(
+                    item.get('role', 'system'),
+                    item.get('text', ''),
+                )
         except Exception:
             pass
 
@@ -1813,10 +2073,6 @@ class MainProgramPanel(QWidget):
 
         if isinstance(data, dict):
             self.current_requirement = str(data.get('objective_text') or self.current_requirement or '').strip()
-
-        selected_loops = data.get('selected_loops') if isinstance(data, dict) else None
-        if isinstance(selected_loops, list) and selected_loops:
-            self.show_load_curve_card(announce=False)
 
         has_load_curve = self._has_load_curve_saved()
         if has_load_curve:
