@@ -178,7 +178,57 @@ def candidate_id(index: int) -> str:
     return f"candidate_{index:02d}"
 
 
-def candidate_design_profile(index: int) -> dict[str, Any]:
+def detect_controller_method(text: str) -> str | None:
+    """Return an explicitly requested controller method, if exactly one is found."""
+    if not text:
+        return None
+
+    lowered = str(text).lower()
+    affirmative_prefix = r"(?:采用|使用|选用|基于|选择|优先|默认|设计|生成|编写)"
+    method_patterns = {
+        "pid": (
+            rf"{affirmative_prefix}[^。；;]{{0,20}}(?:pid|pi\s*控制|比例积分)",
+            r"(?:pid|pi|比例积分)[^。；;]{0,10}(?:控制|调节|调速|伺服)",
+        ),
+        "ladrc": (
+            rf"{affirmative_prefix}[^。；;]{{0,20}}(?:ladrc|adrc|自抗扰|线性自抗扰|active[\s-]*disturbance[\s-]*rejection)",
+            r"(?:ladrc|adrc|自抗扰|线性自抗扰)[^。；;]{0,10}(?:控制|调节|调速|伺服)",
+        ),
+        "smc": (
+            rf"{affirmative_prefix}[^。；;]{{0,20}}(?:smc|滑模|sliding[\s-]*mode)",
+            r"(?:smc|滑模|sliding[\s-]*mode)[^。；;]{0,10}(?:控制|调节|伺服)",
+        ),
+    }
+    def has_explicit_match(patterns: tuple[str, ...]) -> bool:
+        for pattern in patterns:
+            for match in re.finditer(pattern, lowered):
+                prefix = lowered[max(0, match.start() - 10) : match.start()]
+                if re.search(
+                    r"(?:不|不要|无需|避免|禁止|未指定|没有指定|如果|若|可考虑|备选)"
+                    r"(?:采用|使用|选用|选择|考虑)?\s*$",
+                    prefix,
+                ):
+                    continue
+                return True
+        return False
+
+    matched = [
+        method
+        for method, patterns in method_patterns.items()
+        if has_explicit_match(patterns)
+    ]
+    return matched[0] if len(matched) == 1 else None
+
+
+def _project_requirement_text(project_data: dict[str, Any]) -> str:
+    for key in ("objective_text", "requirement", "objective"):
+        value = str(project_data.get(key, "") or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def candidate_design_profile(index: int, controller_method: str | None = None) -> dict[str, Any]:
     profiles = [
         {
             "name": "稳健低超调方案",
@@ -186,7 +236,7 @@ def candidate_design_profile(index: int) -> dict[str, Any]:
             "temperature": 0.15,
             "design_axis": "structure_generation",
             "structure_bias": "稳健型，优先低超调和稳定裕度。",
-            "prompt": "本候选方案优先选择稳健、低超调、易调参的控制结构。若需求允许，机械环优先使用 PID，避免过度复杂结构。",
+            "prompt": "本候选方案优先选择稳健、低超调、易调参的控制结构，避免不必要的复杂结构。",
             "implementation_bias": "代码生成阶段可优先使用保守限幅、低通滤波和低超调逻辑；参数迭代阶段不因此改变评分规则。",
             "preferred_control_methods": [],
             "generation_strategy": {
@@ -249,8 +299,27 @@ def candidate_design_profile(index: int) -> dict[str, Any]:
             "optimize_policy": "shared_metrics_shared_scoring",
         },
     ]
-    profile = dict(profiles[(index - 1) % len(profiles)])
+    if controller_method:
+        assigned_method = controller_method
+        strategy_index = (index - 1) % len(profiles)
+        assignment_source = "user_requirement"
+    else:
+        # Pair identical design strategies so PID and LADRC are compared under
+        # the same bias before moving to the next strategy.
+        methods = ("pid", "ladrc")
+        assigned_method = methods[(index - 1) % len(methods)]
+        strategy_index = ((index - 1) // len(methods)) % len(profiles)
+        assignment_source = "balanced_first_round"
+
+    profile = dict(profiles[strategy_index])
     profile["candidate_id"] = candidate_id(index)
+    profile["preferred_control_methods"] = [assigned_method]
+    profile["controller_method_constraint"] = assigned_method
+    profile["controller_assignment"] = {
+        "method": assigned_method,
+        "source": assignment_source,
+        "role": "user_constraint" if controller_method else "first_round_comparison",
+    }
     return profile
 
 
@@ -390,10 +459,9 @@ def build_candidate_generation_requirement(base_requirement: str, profile: dict[
     if implementation_bias:
         parts.append(f"- 代码逻辑偏置：{implementation_bias}")
     if methods_text:
-        # 第二轮以后（有 parameter_seed_policy 的 profile）才强制方法，
-        # 第一轮 profile 的 preferred_control_methods 只是建议。
         seed_policy = profile.get("parameter_seed_policy") if isinstance(profile, dict) else None
-        if seed_policy:
+        method_constraint = profile.get("controller_method_constraint") if isinstance(profile, dict) else None
+        if seed_policy or method_constraint:
             parts.append(f"- 必须使用的控制方法（只能从以下方法中选择，不得使用未列出的方法）：{methods_text}")
         else:
             parts.append(f"- 优先探索控制方法：{methods_text}")
@@ -430,8 +498,32 @@ def write_candidate_generation_context(
     return context_path
 
 
-def write_candidate_profiles(project_root: Path, candidate_count: int) -> list[dict[str, Any]]:
-    profiles = [candidate_design_profile(index) for index in range(1, candidate_count + 1)]
+def write_candidate_profiles(
+    project_root: Path,
+    candidate_count: int,
+    controller_method: str | None = None,
+    *,
+    preserve_existing: bool = False,
+) -> list[dict[str, Any]]:
+    profiles = [
+        candidate_design_profile(index, controller_method=controller_method)
+        for index in range(1, candidate_count + 1)
+    ]
+    if preserve_existing:
+        existing_profiles = load_candidate_profiles(project_root)
+        for index, assigned_profile in enumerate(profiles):
+            if index >= len(existing_profiles):
+                continue
+            merged = dict(assigned_profile)
+            merged.update(existing_profiles[index])
+            for key in (
+                "candidate_id",
+                "preferred_control_methods",
+                "controller_method_constraint",
+                "controller_assignment",
+            ):
+                merged[key] = assigned_profile[key]
+            profiles[index] = merged
     payload = {
         "schema_version": 1,
         "description": "Candidate generation profiles. Users may edit llm_temperature, prompt, structure_bias, and preferred_control_methods before generation. These fields affect generate only; optimize still uses shared metrics and scoring.",
@@ -760,7 +852,12 @@ def init_candidates(
 
     write_common_requirement_snapshot(project_json, base_project)
     shared_context_files = copy_shared_context_json_files(project_root, project_json, template_root)
-    candidate_profiles = write_candidate_profiles(project_root, candidate_count)
+    controller_method = detect_controller_method(_project_requirement_text(base_project))
+    candidate_profiles = write_candidate_profiles(
+        project_root,
+        candidate_count,
+        controller_method=controller_method,
+    )
     candidates: list[dict[str, Any]] = []
     for index in range(1, candidate_count + 1):
         paths = candidate_paths(project_root, index)

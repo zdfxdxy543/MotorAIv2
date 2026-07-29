@@ -46,8 +46,10 @@ from Competition.competition_workspace import (
     candidate_design_profile,
     candidate_llm_temperature,
     configure_candidate_optimize,
+    detect_controller_method,
     discover_candidate_dirs,
     sync_candidate_profiles_from_common,
+    write_candidate_profiles,
     write_candidate_generation_context,
     write_common_requirement_snapshot,
 )
@@ -872,7 +874,8 @@ class MainProgramPanel(QWidget):
             '重点聚焦以下内容：'
             '1) 根据场景推断是否需要电流环（current_loop），并明确目标、约束、动态响应与可测量量；'
             '2) 根据场景推断机械环（mech_loop）的控制目标与结构层级（速度或位置）；'
-            '3) 根据目标自行选择机械环控制方法（pid/ladrc）并写出选择依据；'
+            '3) 如果用户明确指定机械环控制方法，则保留该方法并写出依据；'
+            '如果用户没有指定，则说明首轮 candidate 将分别探索 pid 和 ladrc，不要替所有 candidate 选择同一种方法；'
             '4) 明确内外环关系、必要信号链路与关键性能指标。'
             '默认工程假设：吸尘器/风机/泵类驱动按高速 BLDC/PMSM 速度控制处理；'
             '伺服驱动按 PMSM 位置-速度-电流级联处理；电流环驱动按 PMSM FOC 电流环处理；'
@@ -1584,8 +1587,26 @@ class MainProgramPanel(QWidget):
             with open(project_json, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             write_common_requirement_snapshot(Path(project_json), data)
-            detected_methods = self._detect_control_methods(requirement_text)
-            for index, candidate_dir in enumerate(self._candidate_dirs(), start=1):
+
+            candidate_dirs = self._candidate_dirs()
+            method_source = str(self._pending_program_text or '').strip()
+            controller_method = detect_controller_method(method_source)
+            method_terms = ('pid', 'ladrc', 'adrc', '自抗扰', '滑模', 'smc', '比例积分')
+            if controller_method is None and not any(
+                term in method_source.lower() for term in method_terms
+            ):
+                controller_method = detect_controller_method(self._program_requirement_before_refine)
+
+            if candidate_dirs:
+                write_candidate_profiles(
+                    Path(project_json).parent,
+                    len(candidate_dirs),
+                    controller_method=controller_method,
+                    preserve_existing=True,
+                )
+                sync_candidate_profiles_from_common(Path(project_json), candidate_dirs)
+
+            for candidate_dir in candidate_dirs:
                 candidate_json = candidate_dir / 'candidate.json'
                 if not candidate_json.exists():
                     continue
@@ -1593,46 +1614,11 @@ class MainProgramPanel(QWidget):
                     candidate_data = json.load(f)
                 if isinstance(candidate_data, dict):
                     candidate_data['objective_text'] = requirement_text
-                    if detected_methods:
-                        design_profile = candidate_data.get('design_profile')
-                        if isinstance(design_profile, dict):
-                            core = [m for m in detected_methods if m in {"pid", "ladrc", "smc", "mit"}]
-                            if not core:
-                                core = ["pid"]
-                            design_profile['preferred_control_methods'] = core
-                            candidate_data['design_profile'] = design_profile
                     with open(candidate_json, 'w', encoding='utf-8') as f:
                         json.dump(candidate_data, f, ensure_ascii=False, indent=2)
             self._append_debug('需求已保存到当前项目。')
         except Exception as exc:
             self._append_error('需求保存失败。', str(exc))
-
-    @staticmethod
-    def _detect_control_methods(text: str) -> set:
-        """从需求文本中检测控制方法关键词。"""
-        method_map = [
-            ("自抗扰", "ladrc"), ("线性自抗扰", "ladrc"),
-            ("ladrc", "ladrc"), ("adrc", "ladrc"),
-            ("滑模控制", "smc"), ("smc", "smc"),
-            ("扰动观测", "disturbance_observer"),
-            ("前馈", "feedforward"), ("feedforward", "feedforward"),
-            ("增益调度", "gain_scheduling"), ("gain scheduling", "gain_scheduling"),
-            ("滤波", "filtering"),
-            ("斜坡", "ramp_limit"),
-            ("pid", "pid"), (" pi ", "pid"), ("pi控制", "pid"), ("pi调节", "pid"),
-            ("比例积分", "pid"),
-            ("mit", "mit"),
-        ]
-        low_text = text.lower()
-        detected = set()
-        for keyword, method in method_map:
-            if keyword in low_text:
-                detected.add(method)
-        # "滑模观测器" 是无传感器速度估计算法，不是控制方法，不要把它的
-        # "滑模" 子串误判为 SMC 控制。
-        if "滑模观测" in low_text and "滑模控制" not in low_text:
-            detected.discard("smc")
-        return detected
 
     def _apply_candidate_profile_overrides(self, text: str):
         project_json = self._project_json_path()
@@ -1787,8 +1773,8 @@ class MainProgramPanel(QWidget):
                 return
 
             self._append_chat('assistant', reply)
-            self._apply_candidate_profile_overrides(reply)
             self._update_project_json_requirement(reply)
+            self._apply_candidate_profile_overrides(reply)
             self._append_chat('assistant', self._candidate_plan_text())
             if project_is_current:
                 self.current_requirement = reply

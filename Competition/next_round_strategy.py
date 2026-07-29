@@ -28,6 +28,7 @@ if str(MOTORAI_ROOT) not in sys.path:
 
 from motorai_config import get_llm_settings, load_settings
 from openai import OpenAI
+from Competition.competition_workspace import detect_controller_method
 
 
 # ── 辅助 ──────────────────────────────────────────────────────────────────
@@ -58,47 +59,13 @@ def _detect_user_method_constraint(requirement: str) -> str:
 
     如果用户没有明确指定方法，返回空字符串。
     """
-    if not requirement:
-        return ""
-
-    found: list[str] = []
-    text = requirement.lower()
-
-    # 肯定句式模式：用户在描述自己选用的方法
-    # 匹配 "采用/使用/选用/基于/选择/优先 pid/pi" 等肯定表达
-    import re
-
-    def _affirmative(keyword: str) -> bool:
-        """检查 keyword 是否出现在肯定上下文中。"""
-        pattern = r'(?:采用|使用|选用|基于|选择|优先|默认|采用.*控制|方案.*采用).{0,10}' + re.escape(keyword)
-        return bool(re.search(pattern, text))
-
-    # PID 及其变体 — 肯定句式
-    pid_affirm = any(
-        re.search(r'(?:采用|使用|选用|基于|选择|优先|默认)[^。]{0,15}' + kw, text)
-        for kw in ("pid", "比例积分微分", "比例积分", "pi控制", "pi ")
-    )
-    if pid_affirm:
-        found.append("PID")
-    elif any(kw in text for kw in ("pid", "比例积分微分", "比例积分")):
-        # 退一步：至少提到了，但不够肯定 → 仍然列入但优先级低
-        found.append("PID")
-
-    # 滑模 — 需要肯定表述
-    if any(
-        re.search(r'(?:采用|使用|选用|基于|选择|优先|默认)[^。]{0,15}' + kw, text)
-        for kw in ("滑模", "smc", "sliding mode")
-    ):
-        found.append("SMC（滑模）")
-
-    # 自抗扰 — 需要肯定表述
-    if any(
-        re.search(r'(?:采用|使用|选用|基于|选择|优先|默认)[^。]{0,15}' + kw, text)
-        for kw in ("自抗扰", "adrc", "ladrc", "线性自抗扰", "active disturbance rejection")
-    ):
-        found.append("LADRC（自抗扰）")
-
-    return "、".join(found)
+    method = detect_controller_method(requirement)
+    labels = {
+        "pid": "PID",
+        "ladrc": "LADRC（自抗扰）",
+        "smc": "SMC（滑模）",
+    }
+    return labels.get(method, "")
 
 
 def _build_system_prompt() -> str:
@@ -131,6 +98,8 @@ def _build_system_prompt() -> str:
 重要规则：
 - 至少保留一个接近 winner 结构的方向（exploit），同时至少有一个尝试不同策略方向（explore）。
   策略差异可以在参数偏置、性能取舍、限幅/滤波策略上体现，不一定要更换控制方法。
+- 如果用户没有指定控制方法，winner 的实际控制方法应占下一轮多数 candidate，
+  同时至少保留一个 PID/LADRC 中另一方法的 challenger。两类方案都需要继续调参。
 - **如果用户原始需求中已经明确指定了控制方法（如"速度环采用PID控制器"），
   则所有 candidate 的 preferred_control_methods 必须包含该方法，不得替换为用户未指定的方法。**
   在这种情况下，explore 方案应聚焦于参数策略差异、响应速度 vs 稳定性的权衡等方向。
@@ -431,6 +400,145 @@ def _deduplicate_inherit(profiles: list[dict[str, Any]]) -> list[dict[str, Any]]
     return profiles
 
 
+def _candidate_controller_methods(feedback: dict[str, Any]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for candidate in feedback.get("candidates") or []:
+        if not isinstance(candidate, dict):
+            continue
+        candidate_id = str(candidate.get("candidate_id", "") or "").strip()
+        manifest = candidate.get("structure_manifest")
+        methods = manifest.get("control_methods") if isinstance(manifest, dict) else []
+        if not isinstance(methods, list):
+            methods = [methods]
+        normalized = [str(method).strip().lower() for method in methods]
+        method = next((item for item in normalized if item in {"pid", "ladrc", "smc"}), "")
+        if candidate_id and method:
+            result[candidate_id] = method
+    return result
+
+
+def _best_candidate_for_method(
+    feedback: dict[str, Any],
+    method: str,
+    candidate_methods: dict[str, str],
+) -> str:
+    ranked: list[tuple[float, str]] = []
+    for candidate in feedback.get("candidates") or []:
+        if not isinstance(candidate, dict):
+            continue
+        candidate_id = str(candidate.get("candidate_id", "") or "").strip()
+        if candidate_methods.get(candidate_id) != method:
+            continue
+        try:
+            score = float(candidate.get("overall_score"))
+        except (TypeError, ValueError):
+            continue
+        ranked.append((score, candidate_id))
+    return max(ranked, default=(float("-inf"), ""))[1]
+
+
+def _apply_controller_method_allocation(
+    profiles: list[dict[str, Any]],
+    feedback: dict[str, Any],
+    requirement_text: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Apply deterministic controller allocation after validating the LLM output."""
+    explicit_method = detect_controller_method(requirement_text)
+    if explicit_method:
+        for profile in profiles:
+            profile["preferred_control_methods"] = [explicit_method]
+            profile["controller_method_constraint"] = explicit_method
+            profile["controller_assignment"] = {
+                "method": explicit_method,
+                "source": "user_requirement",
+                "role": "user_constraint",
+            }
+        return profiles, {
+            "mode": "user_constraint",
+            "winner_method": explicit_method,
+            "winner_slots": len(profiles),
+            "challenger_method": None,
+            "challenger_slots": 0,
+        }
+
+    winner = feedback.get("winner")
+    winner_id = str(winner.get("candidate_id", "") or "").strip() if isinstance(winner, dict) else ""
+    candidate_methods = _candidate_controller_methods(feedback)
+    winner_method = candidate_methods.get(winner_id, "")
+    if not winner_method or not profiles:
+        return profiles, {"mode": "llm_fallback", "winner_method": None}
+
+    challenger_method = "ladrc" if winner_method == "pid" else "pid"
+    profile_count = len(profiles)
+    winner_slots = profile_count if profile_count == 1 else min(
+        profile_count - 1,
+        max(1, int(profile_count * 0.75)),
+    )
+
+    def elite_rank(profile: dict[str, Any]) -> int:
+        seed = profile.get("parameter_seed_policy")
+        source = str(seed.get("source_candidate", "") or "").strip() if isinstance(seed, dict) else ""
+        mode = str(seed.get("mode", "") or "").strip() if isinstance(seed, dict) else ""
+        references = profile.get("reference_candidates") or []
+        if mode == "inherit" and source == winner_id:
+            return 0
+        if source == winner_id or winner_id in references:
+            return 1
+        return 2
+
+    ordered_indexes = sorted(range(profile_count), key=lambda index: elite_rank(profiles[index]))
+    winner_indexes = set(ordered_indexes[:winner_slots])
+    challenger_source = _best_candidate_for_method(feedback, challenger_method, candidate_methods)
+
+    for index, profile in enumerate(profiles):
+        if index in winner_indexes:
+            method = winner_method
+            role = "elite" if elite_rank(profile) == 0 else "exploit"
+            seed = profile.get("parameter_seed_policy")
+            seed = dict(seed) if isinstance(seed, dict) else {}
+            source = str(seed.get("source_candidate", "") or "").strip()
+            if role != "elite" and candidate_methods.get(source) != winner_method:
+                profile["reference_candidates"] = [winner_id]
+                profile["parameter_seed_policy"] = {
+                    "mode": "inherit_then_perturb",
+                    "source_candidate": winner_id,
+                    "perturbation_direction": str(seed.get("perturbation_direction", "") or "")
+                    or "围绕 winner 参数小幅扰动，并针对失败指标继续调优",
+                }
+        else:
+            method = challenger_method
+            role = "challenger"
+            profile["reference_candidates"] = [challenger_source] if challenger_source else []
+            profile["parameter_seed_policy"] = {
+                "mode": "inherit_then_perturb" if challenger_source else "fresh",
+                "source_candidate": challenger_source,
+                "perturbation_direction": (
+                    "围绕该控制方法上一轮最佳参数小幅扰动，并针对失败指标继续调优"
+                    if challenger_source
+                    else ""
+                ),
+            }
+
+        profile["preferred_control_methods"] = [method]
+        profile["controller_method_constraint"] = method
+        profile["controller_assignment"] = {
+            "method": method,
+            "source": "winner_guided_allocation",
+            "role": role,
+            "winner_candidate": winner_id,
+        }
+
+    return profiles, {
+        "mode": "winner_guided_exploit_explore",
+        "winner_candidate": winner_id,
+        "winner_method": winner_method,
+        "winner_slots": winner_slots,
+        "challenger_method": challenger_method,
+        "challenger_slots": profile_count - winner_slots,
+        "challenger_source": challenger_source or None,
+    }
+
+
 # ── 主函数 ────────────────────────────────────────────────────────────────
 
 def generate_next_round_strategy(
@@ -476,6 +584,17 @@ def generate_next_round_strategy(
 
     # ── 精英保留：确保至少一个 candidate 继承 winner ─────────────────
     profiles = _ensure_elite_preservation(profiles, feedback)
+    objective = str(
+        requirement.get("objective_text")
+        or requirement.get("requirement")
+        or requirement.get("objective")
+        or ""
+    )
+    profiles, controller_allocation = _apply_controller_method_allocation(
+        profiles,
+        feedback,
+        objective,
+    )
 
     # 3. 写入输出
     round_dir = project_root / "rounds" / f"round_{to_round:02d}"
@@ -490,6 +609,7 @@ def generate_next_round_strategy(
         "winner": feedback.get("winner"),
         "scoreboard": feedback.get("scoreboard", []),
         "failed_metrics_summary": feedback.get("failed_metrics_summary", []),
+        "controller_allocation": controller_allocation,
         "prev_candidates_summary": [
             {
                 "candidate_id": c.get("candidate_id"),
@@ -512,6 +632,7 @@ def generate_next_round_strategy(
             f"第 {to_round} 轮候选方案策略，由 LLM 基于第 {from_round} 轮实验报告生成。"
             "这些策略只影响 generate 阶段的控制结构选择和参数种子方向。"
         ),
+        "controller_allocation": controller_allocation,
         "profiles": profiles,
     }
     _write_json(round_dir / "candidate_profiles.json", profiles_output)
@@ -522,6 +643,7 @@ def generate_next_round_strategy(
     return {
         "input_feedback": str((round_dir / "input_feedback.json").resolve()),
         "candidate_profiles": str((round_dir / "candidate_profiles.json").resolve()),
+        "controller_allocation": controller_allocation,
         "profiles": profiles,
     }
 
