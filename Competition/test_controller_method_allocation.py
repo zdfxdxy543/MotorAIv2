@@ -15,7 +15,11 @@ from Competition.competition_workspace import (
     detect_controller_method,
     write_candidate_profiles,
 )
-from Competition.next_round_strategy import _apply_controller_method_allocation
+from Competition.next_round_strategy import (
+    _apply_controller_method_allocation,
+    _build_controller_allocation_plan,
+    _build_user_prompt,
+)
 from panels.main_program import MainProgramPanel
 
 
@@ -208,6 +212,39 @@ class LaterRoundControllerAllocationTests(unittest.TestCase):
         )
         self.assertEqual(allocation["mode"], "user_constraint")
         self.assertEqual(allocation["challenger_slots"], 0)
+
+    def test_fixed_allocation_is_included_in_llm_prompt(self):
+        plan = _build_controller_allocation_plan(
+            self._feedback(),
+            "请设计电机转速控制器",
+            4,
+        )
+        prompt = _build_user_prompt({}, self._feedback(), [], 4, plan)
+
+        self.assertIn("固定 candidate 控制方法分配", prompt)
+        self.assertIn("candidate_01：方法=ladrc，角色=elite", prompt)
+        self.assertIn("candidate_04：方法=pid，角色=challenger", prompt)
+
+    def test_conflicting_smc_text_is_normalized_to_assigned_pid(self):
+        feedback = self._feedback()
+        feedback["winner"] = {"candidate_id": "candidate_01", "overall_score": 95.0}
+        profiles = self._profiles()[:3]
+        profiles[1]["name"] = "滑模控制探索"
+        profiles[1]["structure_bias"] = "采用滑模控制替换速度环 PID"
+
+        profiles, _ = _apply_controller_method_allocation(
+            profiles,
+            feedback,
+            "请设计电机转速控制器",
+        )
+
+        profile = profiles[1]
+        self.assertEqual(profile["preferred_control_methods"], ["pid"])
+        self.assertEqual(profile["controller_method_constraint"], "pid")
+        self.assertNotIn("滑模", profile["name"])
+        self.assertNotIn("滑模", profile["structure_bias"])
+        self.assertEqual(profile["name"], "PID参数优化")
+        self.assertTrue(profile["strategy_text_normalized"])
 
 
 class RequirementRefinementControllerAllocationTests(unittest.TestCase):

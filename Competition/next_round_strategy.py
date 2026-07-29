@@ -100,6 +100,8 @@ def _build_system_prompt() -> str:
   策略差异可以在参数偏置、性能取舍、限幅/滤波策略上体现，不一定要更换控制方法。
 - 如果用户没有指定控制方法，winner 的实际控制方法应占下一轮多数 candidate，
   同时至少保留一个 PID/LADRC 中另一方法的 challenger。两类方案都需要继续调参。
+- 用户提示中给出的 candidate 控制方法和角色分配是固定约束。name、structure_bias、
+  preferred_control_methods 和 parameter_seed_policy 必须与该分配一致，不得自行换成其他控制方法。
 - **如果用户原始需求中已经明确指定了控制方法（如"速度环采用PID控制器"），
   则所有 candidate 的 preferred_control_methods 必须包含该方法，不得替换为用户未指定的方法。**
   在这种情况下，explore 方案应聚焦于参数策略差异、响应速度 vs 稳定性的权衡等方向。
@@ -113,6 +115,7 @@ def _build_user_prompt(
     round_feedback: dict[str, Any],
     prev_profiles: list[dict[str, Any]],
     candidate_count: int,
+    controller_allocation: dict[str, Any] | None = None,
 ) -> str:
     """构建包含完整上下文信息的提示词。"""
     parts: list[str] = []
@@ -216,6 +219,22 @@ def _build_user_prompt(
     # 上一轮的方案策略
     if prev_profiles:
         parts.append(f"\n## 上一轮方案策略（供参考）\n```json\n{json.dumps(prev_profiles, ensure_ascii=False, indent=2)}\n```\n")
+
+    assignments = controller_allocation.get("assignments") if isinstance(controller_allocation, dict) else []
+    if isinstance(assignments, list) and assignments:
+        parts.append("\n## 固定 candidate 控制方法分配（不可更改）\n")
+        for assignment in assignments:
+            if not isinstance(assignment, dict):
+                continue
+            source = assignment.get("source_candidate") or "无"
+            parts.append(
+                f"- {assignment.get('candidate_id')}：方法={assignment.get('method')}，"
+                f"角色={assignment.get('role')}，参数来源={source}\n"
+            )
+        parts.append(
+            "每个方案的名称和 structure_bias 必须明确服从其分配方法，"
+            "不得描述或暗示使用其他控制方法。\n"
+        )
 
     # 任务
     parts.append(f"\n## 任务\n")
@@ -437,98 +456,68 @@ def _best_candidate_for_method(
     return max(ranked, default=(float("-inf"), ""))[1]
 
 
-def _apply_controller_method_allocation(
-    profiles: list[dict[str, Any]],
+def _build_controller_allocation_plan(
     feedback: dict[str, Any],
     requirement_text: str,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Apply deterministic controller allocation after validating the LLM output."""
+    profile_count: int,
+) -> dict[str, Any]:
     explicit_method = detect_controller_method(requirement_text)
-    if explicit_method:
-        for profile in profiles:
-            profile["preferred_control_methods"] = [explicit_method]
-            profile["controller_method_constraint"] = explicit_method
-            profile["controller_assignment"] = {
-                "method": explicit_method,
-                "source": "user_requirement",
-                "role": "user_constraint",
-            }
-        return profiles, {
-            "mode": "user_constraint",
-            "winner_method": explicit_method,
-            "winner_slots": len(profiles),
-            "challenger_method": None,
-            "challenger_slots": 0,
-        }
-
     winner = feedback.get("winner")
     winner_id = str(winner.get("candidate_id", "") or "").strip() if isinstance(winner, dict) else ""
+
+    if explicit_method:
+        return {
+            "mode": "user_constraint",
+            "winner_method": explicit_method,
+            "winner_slots": profile_count,
+            "challenger_method": None,
+            "challenger_slots": 0,
+            "assignments": [
+                {
+                    "candidate_id": f"candidate_{index + 1:02d}",
+                    "method": explicit_method,
+                    "role": "user_constraint",
+                    "source_candidate": "",
+                }
+                for index in range(profile_count)
+            ],
+        }
+
     candidate_methods = _candidate_controller_methods(feedback)
     winner_method = candidate_methods.get(winner_id, "")
-    if not winner_method or not profiles:
-        return profiles, {"mode": "llm_fallback", "winner_method": None}
+    if not winner_method or profile_count < 1:
+        return {"mode": "llm_fallback", "winner_method": None, "assignments": []}
 
     challenger_method = "ladrc" if winner_method == "pid" else "pid"
-    profile_count = len(profiles)
     winner_slots = profile_count if profile_count == 1 else min(
         profile_count - 1,
         max(1, int(profile_count * 0.75)),
     )
-
-    def elite_rank(profile: dict[str, Any]) -> int:
-        seed = profile.get("parameter_seed_policy")
-        source = str(seed.get("source_candidate", "") or "").strip() if isinstance(seed, dict) else ""
-        mode = str(seed.get("mode", "") or "").strip() if isinstance(seed, dict) else ""
-        references = profile.get("reference_candidates") or []
-        if mode == "inherit" and source == winner_id:
-            return 0
-        if source == winner_id or winner_id in references:
-            return 1
-        return 2
-
-    ordered_indexes = sorted(range(profile_count), key=lambda index: elite_rank(profiles[index]))
-    winner_indexes = set(ordered_indexes[:winner_slots])
     challenger_source = _best_candidate_for_method(feedback, challenger_method, candidate_methods)
-
-    for index, profile in enumerate(profiles):
-        if index in winner_indexes:
+    assignments: list[dict[str, Any]] = []
+    for index in range(profile_count):
+        if index == 0:
             method = winner_method
-            role = "elite" if elite_rank(profile) == 0 else "exploit"
-            seed = profile.get("parameter_seed_policy")
-            seed = dict(seed) if isinstance(seed, dict) else {}
-            source = str(seed.get("source_candidate", "") or "").strip()
-            if role != "elite" and candidate_methods.get(source) != winner_method:
-                profile["reference_candidates"] = [winner_id]
-                profile["parameter_seed_policy"] = {
-                    "mode": "inherit_then_perturb",
-                    "source_candidate": winner_id,
-                    "perturbation_direction": str(seed.get("perturbation_direction", "") or "")
-                    or "围绕 winner 参数小幅扰动，并针对失败指标继续调优",
-                }
+            role = "elite"
+            source = winner_id
+        elif index < winner_slots:
+            method = winner_method
+            role = "exploit"
+            source = winner_id
         else:
             method = challenger_method
             role = "challenger"
-            profile["reference_candidates"] = [challenger_source] if challenger_source else []
-            profile["parameter_seed_policy"] = {
-                "mode": "inherit_then_perturb" if challenger_source else "fresh",
-                "source_candidate": challenger_source,
-                "perturbation_direction": (
-                    "围绕该控制方法上一轮最佳参数小幅扰动，并针对失败指标继续调优"
-                    if challenger_source
-                    else ""
-                ),
+            source = challenger_source
+        assignments.append(
+            {
+                "candidate_id": f"candidate_{index + 1:02d}",
+                "method": method,
+                "role": role,
+                "source_candidate": source,
             }
+        )
 
-        profile["preferred_control_methods"] = [method]
-        profile["controller_method_constraint"] = method
-        profile["controller_assignment"] = {
-            "method": method,
-            "source": "winner_guided_allocation",
-            "role": role,
-            "winner_candidate": winner_id,
-        }
-
-    return profiles, {
+    return {
         "mode": "winner_guided_exploit_explore",
         "winner_candidate": winner_id,
         "winner_method": winner_method,
@@ -536,7 +525,132 @@ def _apply_controller_method_allocation(
         "challenger_method": challenger_method,
         "challenger_slots": profile_count - winner_slots,
         "challenger_source": challenger_source or None,
+        "assignments": assignments,
     }
+
+
+def _mentioned_controller_methods(text: str) -> set[str]:
+    lowered = str(text or "").lower()
+    keywords = {
+        "pid": ("pid", "比例积分"),
+        "ladrc": ("ladrc", "adrc", "自抗扰"),
+        "smc": ("smc", "滑模"),
+    }
+    return {
+        method
+        for method, terms in keywords.items()
+        if any(term in lowered for term in terms)
+    }
+
+
+def _normalize_conflicting_strategy_text(
+    profile: dict[str, Any],
+    method: str,
+    role: str,
+    winner_id: str,
+) -> None:
+    strategy_text = f"{profile.get('name', '')} {profile.get('structure_bias', '')}"
+    if not (_mentioned_controller_methods(strategy_text) - {method}):
+        return
+
+    label = {"pid": "PID", "ladrc": "LADRC", "smc": "SMC"}.get(method, method.upper())
+    if role == "elite":
+        name = f"{label}精英保留"
+        bias = f"保持上一轮 winner {winner_id} 的 {label} 控制结构和最优参数。"
+    elif role == "challenger":
+        name = f"{label}挑战优化"
+        bias = f"采用 {label} 控制结构，继承该方法上一轮最佳参数并继续调优。"
+    elif role == "user_constraint":
+        name = f"{label}参数策略"
+        bias = f"保持用户指定的 {label} 控制结构，在该方法内探索参数和性能取舍。"
+    else:
+        name = f"{label}参数优化"
+        bias = f"采用 {label} 控制结构，围绕上一轮 winner 参数继续优化。"
+    profile["name"] = name
+    profile["structure_bias"] = bias
+    profile["strategy_text_normalized"] = True
+
+
+def _apply_controller_method_allocation(
+    profiles: list[dict[str, Any]],
+    feedback: dict[str, Any],
+    requirement_text: str,
+    allocation_plan: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Apply deterministic controller allocation after validating the LLM output."""
+    plan = allocation_plan or _build_controller_allocation_plan(
+        feedback,
+        requirement_text,
+        len(profiles),
+    )
+    assignments = plan.get("assignments") if isinstance(plan, dict) else []
+    if not isinstance(assignments, list) or not assignments:
+        return profiles, plan
+
+    winner_id = str(plan.get("winner_candidate", "") or "")
+    candidate_methods = _candidate_controller_methods(feedback)
+    assignment_by_id = {
+        str(item.get("candidate_id")): item
+        for item in assignments
+        if isinstance(item, dict) and item.get("candidate_id")
+    }
+    for profile in profiles:
+        assignment = assignment_by_id.get(str(profile.get("candidate_id", "")))
+        if not assignment:
+            continue
+        method = str(assignment.get("method", "") or "").lower()
+        role = str(assignment.get("role", "") or "")
+        source = str(assignment.get("source_candidate", "") or "")
+        seed = profile.get("parameter_seed_policy")
+        seed = dict(seed) if isinstance(seed, dict) else {}
+
+        if role == "elite":
+            profile["reference_candidates"] = [source] if source else []
+            profile["parameter_seed_policy"] = {
+                "mode": "inherit" if source else "fresh",
+                "source_candidate": source,
+                "perturbation_direction": "",
+            }
+        elif role == "exploit":
+            profile["reference_candidates"] = [source] if source else []
+            profile["parameter_seed_policy"] = {
+                "mode": "inherit_then_perturb" if source else "fresh",
+                "source_candidate": source,
+                "perturbation_direction": str(seed.get("perturbation_direction", "") or "")
+                or ("围绕 winner 参数小幅扰动，并针对失败指标继续调优" if source else ""),
+            }
+        elif role == "challenger":
+            profile["reference_candidates"] = [source] if source else []
+            profile["parameter_seed_policy"] = {
+                "mode": "inherit_then_perturb" if source else "fresh",
+                "source_candidate": source,
+                "perturbation_direction": (
+                    "围绕该控制方法上一轮最佳参数小幅扰动，并针对失败指标继续调优"
+                    if source
+                    else ""
+                ),
+            }
+        elif role == "user_constraint":
+            source = str(seed.get("source_candidate", "") or "")
+            if source and candidate_methods.get(source) != method:
+                profile["reference_candidates"] = []
+                profile["parameter_seed_policy"] = {
+                    "mode": "fresh",
+                    "source_candidate": "",
+                    "perturbation_direction": "",
+                }
+
+        profile["preferred_control_methods"] = [method]
+        profile["controller_method_constraint"] = method
+        profile["controller_assignment"] = {
+            "method": method,
+            "source": "user_requirement" if role == "user_constraint" else "winner_guided_allocation",
+            "role": role,
+            "winner_candidate": winner_id,
+        }
+        _normalize_conflicting_strategy_text(profile, method, role, winner_id)
+
+    return _deduplicate_inherit(profiles), plan
 
 
 # ── 主函数 ────────────────────────────────────────────────────────────────
@@ -569,9 +683,27 @@ def generate_next_round_strategy(
     if candidate_count <= 0:
         candidate_count = int(project_data.get("candidate_count") or len(prev_profiles) or 4)
 
+    objective = str(
+        requirement.get("objective_text")
+        or requirement.get("requirement")
+        or requirement.get("objective")
+        or ""
+    )
+    controller_allocation = _build_controller_allocation_plan(
+        feedback,
+        objective,
+        candidate_count,
+    )
+
     # 2. 构建 prompt 并调用 LLM
     system = _build_system_prompt()
-    user = _build_user_prompt(requirement, feedback, prev_profiles, candidate_count)
+    user = _build_user_prompt(
+        requirement,
+        feedback,
+        prev_profiles,
+        candidate_count,
+        controller_allocation,
+    )
 
     print("正在调用 LLM 分析第一轮实验报告，生成第二轮方案策略...")
     llm_result = _call_llm(user, system)
@@ -582,18 +714,13 @@ def generate_next_round_strategy(
 
     profiles = _validate_profiles(raw_profiles, candidate_count)
 
-    # ── 精英保留：确保至少一个 candidate 继承 winner ─────────────────
-    profiles = _ensure_elite_preservation(profiles, feedback)
-    objective = str(
-        requirement.get("objective_text")
-        or requirement.get("requirement")
-        or requirement.get("objective")
-        or ""
-    )
+    if controller_allocation.get("mode") == "llm_fallback":
+        profiles = _ensure_elite_preservation(profiles, feedback)
     profiles, controller_allocation = _apply_controller_method_allocation(
         profiles,
         feedback,
         objective,
+        controller_allocation,
     )
 
     # 3. 写入输出
