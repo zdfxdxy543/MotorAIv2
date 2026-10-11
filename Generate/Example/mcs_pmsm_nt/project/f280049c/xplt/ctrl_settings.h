@@ -11,7 +11,7 @@
 // BUILD_LEVEL 4: speed loop
 // BUILD_LEVEL 5: position loop
 // BUILD_LEVEL 6: communication mode
-#define BUILD_LEVEL (5)
+#define BUILD_LEVEL (4)
 
 //=================================================================================================
 // Controller basic parameters
@@ -20,7 +20,7 @@
 #define CTRL_STARTUP_DELAY (100)
 
 // Controller Frequency
-#define CONTROLLER_FREQUENCY (12e3)
+#define CONTROLLER_FREQUENCY (20e3)
 
 // PWM depth
 #define CTRL_PWM_CMP_MAX (2500 - 1)
@@ -32,7 +32,7 @@
 #define DSP_C2000_DSP_TIME_DIV (100000 / CTRL_PWM_CMP_MAX / 2)
 
 // ADC Voltage Reference
-#define CTRL_ADC_VOLTAGE_REF (2.5f)
+#define CTRL_ADC_VOLTAGE_REF (3.3f)
 
 //=================================================================================================
 // Hardware parameters
@@ -40,7 +40,7 @@
 #define BOOSTXL_3PHGANINV_IS_DEFAULT_PARAM
 
 // invoke motor parameters
-#include <two_axis_motor.h>
+#include <ctl/component/hardware_preset/pmsm_motor/SM060R20B30MNAD.h>
 
 // invoke motor controller parameters
 #include <MONKEY_BOARD.h>

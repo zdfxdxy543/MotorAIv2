@@ -132,6 +132,7 @@ adc3.soc1Name                = "J3_VV";
 adc3.soc1Channel             = "ADC_CH_ADCIN2";
 
 asysctl.analogReference = "INTERNAL";
+asysctl.analogReferenceVoltage = "1P65";
 
 can1.$name                 = "IRIS_CAN";
 can1.enableInterrupt       = true;

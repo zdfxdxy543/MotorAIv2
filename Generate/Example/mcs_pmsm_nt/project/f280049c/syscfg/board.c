@@ -224,7 +224,7 @@ void IRIS_ADCA_init(){
 	// This function sets the analog voltage reference to internal (with the reference voltage of 1.65V or 2.5V) or external for ADC
 	// which is same as ASysCtl APIs.
 	//
-	ADC_setVREF(IRIS_ADCA_BASE, ADC_REFERENCE_INTERNAL, ADC_REFERENCE_2_5V);
+	ADC_setVREF(IRIS_ADCA_BASE, ADC_REFERENCE_INTERNAL, ADC_REFERENCE_3_3V);
 	//
 	// Configures the analog-to-digital converter module prescaler.
 	//
@@ -302,7 +302,7 @@ void IRIS_ADCB_init(){
 	// This function sets the analog voltage reference to internal (with the reference voltage of 1.65V or 2.5V) or external for ADC
 	// which is same as ASysCtl APIs.
 	//
-	ADC_setVREF(IRIS_ADCB_BASE, ADC_REFERENCE_INTERNAL, ADC_REFERENCE_2_5V);
+	ADC_setVREF(IRIS_ADCB_BASE, ADC_REFERENCE_INTERNAL, ADC_REFERENCE_3_3V);
 	//
 	// Configures the analog-to-digital converter module prescaler.
 	//
@@ -382,7 +382,7 @@ void IRIS_ADCC_init(){
 	// This function sets the analog voltage reference to internal (with the reference voltage of 1.65V or 2.5V) or external for ADC
 	// which is same as ASysCtl APIs.
 	//
-	ADC_setVREF(IRIS_ADCC_BASE, ADC_REFERENCE_INTERNAL, ADC_REFERENCE_2_5V);
+	ADC_setVREF(IRIS_ADCC_BASE, ADC_REFERENCE_INTERNAL, ADC_REFERENCE_3_3V);
 	//
 	// Configures the analog-to-digital converter module prescaler.
 	//
@@ -459,9 +459,9 @@ void ASYSCTL_init(){
 	//
 	ASysCtl_setAnalogReferenceInternal( ASYSCTL_VREFHIA | ASYSCTL_VREFHIB | ASYSCTL_VREFHIC );
 	//
-	// Set the internal analog voltage reference selection to 2.5V.
+	// Set the internal analog voltage reference selection to 1.65V.
 	//
-	ASysCtl_setAnalogReference2P5( ASYSCTL_VREFHIA | ASYSCTL_VREFHIB | ASYSCTL_VREFHIC );
+	ASysCtl_setAnalogReference1P65( ASYSCTL_VREFHIA | ASYSCTL_VREFHIB | ASYSCTL_VREFHIC );
 }
 
 //*****************************************************************************

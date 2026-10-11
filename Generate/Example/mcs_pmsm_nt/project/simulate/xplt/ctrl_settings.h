@@ -59,7 +59,7 @@
 // Controller Base value
 
 // DC bus voltage
-#define CTRL_DCBUS_VOLTAGE (80.0f)
+#define CTRL_DCBUS_VOLTAGE (48.0f)
 
 // phase voltage base, SVPWM modulation
 #define CTRL_VOLTAGE_BASE (CTRL_DCBUS_VOLTAGE / 1.73205081f)

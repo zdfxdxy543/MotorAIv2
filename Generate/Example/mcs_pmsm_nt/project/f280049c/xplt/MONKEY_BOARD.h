@@ -70,8 +70,8 @@ extern "C"
 //--- 4.1: Phase Current Sensing ---
 #if (MY_BOARD_PH_CURRENT_SENSE_TYPE == SENSOR_TYPE_SHUNT) // SENSOR_TYPE_SHUNT
 // If using a shunt resistor, define the following parameters:
-#define MY_BOARD_PH_SHUNT_RESISTANCE_OHM (0.01f) // Resistance of the shunt resistor (Ohm)
-#define MY_BOARD_PH_CSA_GAIN_V_V         (10.0f)  // Gain of the Current Sense Amplifier (CSA) (V/V)
+#define MY_BOARD_PH_SHUNT_RESISTANCE_OHM (0.005f) // Resistance of the shunt resistor (Ohm)
+#define MY_BOARD_PH_CSA_GAIN_V_V         (20.0f)  // Gain of the Current Sense Amplifier (CSA) (V/V)
 #define MY_BOARD_PH_CSA_BIAS_V           (1.65f)  // Bias voltage of the amplifier's output (V)
 #elif (MY_BOARD_PH_CURRENT_SENSE_TYPE == 2 ||                                                                          \
        MY_BOARD_PH_CURRENT_SENSE_TYPE == 3)           // SENSOR_TYPE_HALL or SENSOR_TYPE_DIRECT
