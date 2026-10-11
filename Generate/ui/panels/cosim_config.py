@@ -79,11 +79,10 @@ class CandidateNetworkPanel(QWidget):
         self.transmit_port_spin = self._make_port_spin()
         form.addRow("transmit_port", self.transmit_port_spin)
 
-        self.command_recv_port_spin = self._make_port_spin()
-        form.addRow("command_recv_port", self.command_recv_port_spin)
-
-        self.command_trans_port_spin = self._make_port_spin()
-        form.addRow("command_trans_port", self.command_trans_port_spin)
+        self.transport_combo = QComboBox()
+        self.transport_combo.addItem("UDP", "udp")
+        self.transport_combo.addItem("TCP", "tcp")
+        form.addRow("传输协议", self.transport_combo)
 
         layout.addLayout(form)
 
@@ -175,8 +174,7 @@ class CandidateNetworkPanel(QWidget):
             self.target_address_edit.setText(str(network.get("target_address") or "127.0.0.1"))
             self.receive_port_spin.setValue(int(network.get("receive_port") or 12500))
             self.transmit_port_spin.setValue(int(network.get("transmit_port") or 12501))
-            self.command_recv_port_spin.setValue(int(network.get("command_recv_port") or 12502))
-            self.command_trans_port_spin.setValue(int(network.get("command_trans_port") or 12503))
+            self.transport_combo.setCurrentIndex(max(0, self.transport_combo.findData(str(network.get("transport") or "udp"))))
         finally:
             self._loading = False
         self._on_mode_changed()
@@ -194,10 +192,9 @@ class CandidateNetworkPanel(QWidget):
             self.target_address_edit,
             self.receive_port_spin,
             self.transmit_port_spin,
-            self.command_recv_port_spin,
-            self.command_trans_port_spin,
+            self.transport_combo,
         ):
-            widget.setEnabled(remote_enabled or scheduled_enabled)
+            widget.setEnabled(True)
 
     def save_current(self):
         project_json = self._project_json_path()
@@ -225,8 +222,7 @@ class CandidateNetworkPanel(QWidget):
                 target_address=self.target_address_edit.text().strip() or "127.0.0.1",
                 receive_port=int(self.receive_port_spin.value()),
                 transmit_port=int(self.transmit_port_spin.value()),
-                command_recv_port=int(self.command_recv_port_spin.value()),
-                command_trans_port=int(self.command_trans_port_spin.value()),
+                transport=str(self.transport_combo.currentData() or "udp"),
             )
         except Exception as exc:
             QMessageBox.critical(self, "错误", f"保存失败：{exc}")

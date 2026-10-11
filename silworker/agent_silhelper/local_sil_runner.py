@@ -1,26 +1,28 @@
 from __future__ import annotations
 
-import json
-import os
-import re
-import tempfile
-import time
 from typing import Any, Dict, List, Optional, Tuple
 
-import matlab.engine
+try:
+    import matlab.engine
+except ImportError:
+    matlab = None
 
-_MATLAB_VAR_RE = re.compile(r"^[A-Za-z]\w*$")
-
+try:
+    from .sil_session import run_matlab_job
+except ImportError:
+    from sil_session import run_matlab_job
 
 class LocalSimulinkRunner:
     """Run a local Simulink model and collect diagnostics plus scope signals."""
 
-    def __init__(self, matlab_session_name: Optional[str] = None):
-        sessions = matlab.engine.find_matlab()
-        if not sessions:
-            raise RuntimeError(
-                "No shared MATLAB session found. In MATLAB run: matlab.engine.shareEngine"
-            )
+    def __init__(self, matlab_session_name: Optional[str] = None, *, force_batch: bool = False):
+        self.eng = None
+        self.session_name = "batch"
+        if force_batch:
+            return
+        sessions = matlab.engine.find_matlab() if matlab is not None else []
+        if not sessions and not matlab_session_name:
+            return
 
         if matlab_session_name:
             if matlab_session_name not in sessions:
@@ -40,272 +42,26 @@ class LocalSimulinkRunner:
         scope_channel_map: Dict[str, List[str]],
         scope_vars: Optional[List[str]] = None,
         open_model_ui: bool = True,
+        gmp_root: Optional[str] = None,
+        network_config: Optional[Dict[str, Any]] = None,
+        expected_connection_id: Optional[str] = None,
+        timeout_sec: int = 1800,
     ) -> Dict[str, Any]:
-        resolved_model = self._prepare_model(model_path=model_path, open_model_ui=open_model_ui)
-
-        diagnostics: Dict[str, Any] = {
-            "error_msg": None,
-            "execution_time_sec": 0.0,
-            "resolved_model": resolved_model,
-            "matlab_console": "",
-            "matlab_error_report": "",
-            "matlab_lastwarn_msg": "",
-            "matlab_lastwarn_id": "",
-            "model_sim_status": "unknown",
-            "matlab_session": self.session_name,
-        }
-
-        start = time.time()
-        sim_capture = self._run_with_console_capture(resolved_model)
-        diagnostics["execution_time_sec"] = round(time.time() - start, 3)
-        diagnostics["matlab_console"] = sim_capture["console"]
-        diagnostics["matlab_error_report"] = sim_capture["error_report"]
-        diagnostics["matlab_lastwarn_msg"] = sim_capture["lastwarn_msg"]
-        diagnostics["matlab_lastwarn_id"] = sim_capture["lastwarn_id"]
-        diagnostics["model_sim_status"] = sim_capture["model_sim_status"]
-
-        print(f"[silworker]   sim() elapsed={diagnostics['execution_time_sec']}s  "
-              f"status={sim_capture['sim_status']}  model_status={sim_capture['model_sim_status']}  "
-              f"error={sim_capture['error_report'][:200] if sim_capture['error_report'] else 'none'}")
-
-        status = "done" if sim_capture["sim_status"] == "done" else "failed"
-        if status == "failed":
-            diagnostics["error_msg"] = sim_capture["error_report"] or "MATLAB simulation failed"
-
-        actual_scope_vars = list(scope_vars or scope_channel_map.keys())
-        raw_scopes: Dict[str, Any] = {}
-        for scope_var in actual_scope_vars:
-            raw_scopes[scope_var] = self._read_workspace_var_as_json(scope_var)
-
-        merged_signals, mapping_errors = self._merge_scope_signals(raw_scopes, scope_channel_map)
-
-        # 诊断：输出每个 signal 的采样数和首尾值
-        signal_summary = []
-        for name, sig in sorted(merged_signals.items()):
-            vals = sig.get("values", []) if isinstance(sig, dict) else []
-            t = sig.get("time", []) if isinstance(sig, dict) else []
-            first = vals[0] if vals else "N/A"
-            last = vals[-1] if vals else "N/A"
-            signal_summary.append(f"{name}: {len(vals)} samples, time=[{t[0] if t else '?'}..{t[-1] if t else '?'}], first={first}, last={last}")
-        print(f"[silworker]   signals ({len(merged_signals)}): " + "; ".join(signal_summary[:10]))
-
-        return {
-            "status": status,
-            "diagnostics": diagnostics,
-            "signals": merged_signals,
-            "raw_scopes": raw_scopes,
-            "scope_mapping_errors": mapping_errors,
-        }
-
-    def _prepare_model(self, model_path: str, open_model_ui: bool) -> str:
-        normalized = os.path.abspath(os.path.normpath(model_path))
-        if not os.path.exists(normalized):
-            raise FileNotFoundError(f"Model file not found: {normalized}")
-
-        model_dir, model_file = os.path.split(normalized)
-        model_name, ext = os.path.splitext(model_file)
-        if ext.lower() != ".slx":
-            raise ValueError(f"Only .slx model is supported, got: {model_file}")
-
-        matlab_model_dir = model_dir.replace("\\", "/")
-        self.eng.cd(matlab_model_dir, nargout=0)
-        self.eng.addpath(matlab_model_dir, nargout=0)
-        self.eng.load_system(model_name, nargout=0)
-
-        # 检查并修正 StopTime：若为 0 或未初始化的变量，设置默认值 10s
-        try:
-            stop_time_raw = str(self.eng.get_param(model_name, "StopTime", nargout=1)).strip()
-            try:
-                stop_time_val = float(stop_time_raw)
-            except ValueError:
-                stop_time_val = 0.0
-            if stop_time_val <= 0.0:
-                self.eng.set_param(model_name, "StopTime", "10.0", nargout=0)
-                print(f"[silworker]   StopTime overridden: '{stop_time_raw}' -> 10.0")
-        except Exception:
-            pass
-
-        if open_model_ui:
-            try:
-                self.eng.open_system(model_name, nargout=0)
-            except Exception:
-                pass
-
-        return model_name
-
-    def _run_with_console_capture(self, model_name: str) -> Dict[str, str]:
-        self.eng.lastwarn("", nargout=0)
-
-        with tempfile.NamedTemporaryFile(prefix="gmp_local_sil_", suffix=".log", delete=False) as fh:
-            diary_file = fh.name
-
-        diary_file_matlab = diary_file.replace("\\", "/")
-
-        try:
-            self.eng.diary(diary_file_matlab, nargout=0)
-            self.eng.diary("on", nargout=0)
-        except Exception:
-            diary_file = ""
-
-        sim_status = "done"
-        sim_error = ""
-        sim_console = ""
-
-        try:
-            self.eng.eval(f"out = sim('{model_name}'); assignin('base', 'out', out);", nargout=0)
-        except matlab.engine.MatlabExecutionError as exc:
-            sim_status = "failed"
-            sim_error = str(exc)
-        finally:
-            try:
-                self.eng.diary("off", nargout=0)
-            except Exception:
-                pass
-
-        if diary_file and os.path.exists(diary_file):
-            try:
-                with open(diary_file, "r", encoding="utf-8", errors="ignore") as fh:
-                    sim_console = fh.read()
-            finally:
-                try:
-                    os.remove(diary_file)
-                except Exception:
-                    pass
-
-        lastwarn_msg = ""
-        lastwarn_id = ""
-        try:
-            lastwarn_msg, lastwarn_id = self.eng.lastwarn(nargout=2)
-        except Exception:
-            pass
-
-        model_sim_status = "unknown"
-        try:
-            model_sim_status = self.eng.get_param(model_name, "SimulationStatus", nargout=1)
-        except Exception:
-            pass
-
-        return {
-            "sim_status": sim_status,
-            "console": self._trim_text(sim_console),
-            "error_report": self._trim_text(sim_error),
-            "lastwarn_msg": self._trim_text(lastwarn_msg, max_len=2000),
-            "lastwarn_id": self._trim_text(lastwarn_id, max_len=500),
-            "model_sim_status": str(model_sim_status),
-        }
-
-    def _read_workspace_var_as_json(self, var_name: str) -> Any:
-        if not _MATLAB_VAR_RE.match(var_name):
-            return {"_error": f"Invalid MATLAB variable name: {var_name}"}
-
-        self.eng.workspace["gmp_scope_var_name"] = var_name
-        self.eng.eval(
-            """
-gmp_scope_json = "";
-try
-    gmp_scope_name = gmp_scope_var_name;
-    gmp_v = [];
-    gmp_found = false;
-
-    try
-        gmp_v = evalin("base", gmp_scope_name);
-        gmp_found = true;
-    catch
-    end
-
-    if ~gmp_found
-        try
-            gmp_out = evalin("base", "out");
-
-            if isa(gmp_out, "Simulink.SimulationOutput")
-                try
-                    gmp_v = gmp_out.get(gmp_scope_name);
-                    gmp_found = true;
-                catch
-                end
-            elseif isstruct(gmp_out) && isfield(gmp_out, gmp_scope_name)
-                gmp_v = gmp_out.(gmp_scope_name);
-                gmp_found = true;
-            end
-
-            if ~gmp_found
-                gmp_available = {};
-                if isa(gmp_out, "Simulink.SimulationOutput")
-                    try
-                        gmp_available = who(gmp_out);
-                    catch
-                    end
-                elseif isstruct(gmp_out)
-                    gmp_available = fieldnames(gmp_out);
-                end
-
-                if isempty(gmp_available)
-                    error("GMP:ScopeVarNotFound", "Scope variable '%s' not found in base workspace or out.", gmp_scope_name);
-                else
-                    error("GMP:ScopeVarNotFound", "Scope variable '%s' not found. Available in out: %s", gmp_scope_name, strjoin(cellstr(gmp_available), ", "));
-                end
-            end
-        catch gmp_outer_me
-            error(gmp_outer_me.identifier, gmp_outer_me.message);
-        end
-    end
-
-    if isa(gmp_v, "timeseries")
-        gmp_out = struct("time", gmp_v.Time, "signals", struct("label", "CH1", "values", gmp_v.Data));
-
-    elseif isa(gmp_v, "Simulink.SimulationData.Dataset")
-        gmp_n = numElements(gmp_v);
-        gmp_sig = struct("label", {}, "values", {});
-        gmp_time = [];
-        for gmp_i = 1:gmp_n
-            gmp_e = get(gmp_v, gmp_i);
-            gmp_val = gmp_e.Values;
-            gmp_label = char(gmp_e.Name);
-            if isempty(gmp_label)
-                gmp_label = sprintf("CH%d", gmp_i);
-            end
-
-            if isa(gmp_val, "timeseries")
-                if isempty(gmp_time)
-                    gmp_time = gmp_val.Time;
-                end
-                gmp_sig(gmp_i).label = gmp_label;
-                gmp_sig(gmp_i).values = gmp_val.Data;
-            else
-                gmp_sig(gmp_i).label = gmp_label;
-                gmp_sig(gmp_i).values = gmp_val;
-            end
-        end
-        gmp_out = struct("time", gmp_time, "signals", gmp_sig);
-
-    elseif isstruct(gmp_v)
-        gmp_out = gmp_v;
-
-    else
-        gmp_out = struct("value", gmp_v);
-    end
-
-    gmp_scope_json = jsonencode(gmp_out);
-catch gmp_me
-    gmp_scope_json = jsonencode(struct("error", gmp_me.message));
-end
-""",
-            nargout=0,
+        result = run_matlab_job(
+            model_path, action="run", gmp_root=gmp_root, network=network_config,
+            scope_vars=list(scope_vars or scope_channel_map),
+            expected_connection_id=expected_connection_id, timeout_sec=timeout_sec,
+            engine=self.eng,
+            open_model_ui=open_model_ui,
         )
-
-        try:
-            json_text = str(self.eng.workspace["gmp_scope_json"])
-            payload = json.loads(json_text)
-            if isinstance(payload, dict) and "error" in payload and "_error" not in payload:
-                payload["_error"] = str(payload.get("error", ""))
-            return payload
-        except Exception as exc:
-            return {"_error": f"JSON decode failed for {var_name}: {exc}"}
-        finally:
-            self.eng.eval(
-                "clear gmp_scope_var_name gmp_scope_json gmp_scope_name gmp_v gmp_found gmp_out gmp_available gmp_n gmp_sig gmp_time gmp_i gmp_e gmp_val gmp_label gmp_me gmp_outer_me",
-                nargout=0,
-            )
+        raw_scopes = result.get("raw_scopes", {})
+        for payload in raw_scopes.values():
+            if isinstance(payload, dict) and "error" in payload:
+                payload["_error"] = payload["error"]
+        signals, errors = self._merge_scope_signals(raw_scopes, scope_channel_map)
+        result.update(signals=signals, scope_mapping_errors=errors)
+        result["diagnostics"]["matlab_session"] = self.session_name
+        return result
 
     def _merge_scope_signals(
         self,

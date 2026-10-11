@@ -28,22 +28,19 @@ def start_bat_async(
     if args:
         command.extend(str(arg) for arg in args)
 
-    creationflags = 0
-    if new_console:
-        creationflags |= getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
-    else:
-        creationflags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
     try:
-        proc = subprocess.Popen(
-            command,
-            cwd=str(bat_path.parent),
-            creationflags=creationflags,
-        )
+        console_log = bat_path.with_name(bat_path.stem + "_console.log")
+        with console_log.open("wb") as console:
+            proc = subprocess.Popen(
+                command, cwd=str(bat_path.parent), creationflags=creationflags,
+                stdout=console, stderr=subprocess.STDOUT,
+            )
     except OSError as exc:
         return None, f"Error: failed to start bat file: {bat_path}\n{exc}"
 
-    return proc, f"OK: started bat asynchronously. pid={proc.pid}, bat={bat_path}"
+    return proc, f"OK: started bat asynchronously. pid={proc.pid}, bat={bat_path}, console_log={console_log}"
 
 
 def run_bat_sync_in_new_console(
@@ -59,9 +56,20 @@ def run_bat_sync_in_new_console(
     try:
         returncode = proc.wait(timeout=timeout_sec)
     except subprocess.TimeoutExpired:
+        stop_process_tree(proc)
         return f"Error: bat timed out after {timeout_sec} seconds. pid={proc.pid}, bat={bat_path}"
 
     if returncode != 0:
-        return f"Error: bat failed. returncode={returncode}, pid={proc.pid}, bat={bat_path}"
+        log = bat_path.with_name(bat_path.stem + "_console.log")
+        detail = log.read_text(encoding="utf-8", errors="replace")[-12000:] if log.is_file() else ""
+        return f"Error: bat failed. returncode={returncode}, pid={proc.pid}, bat={bat_path}\n{detail}"
 
     return f"OK: bat finished successfully. returncode=0, pid={proc.pid}, bat={bat_path}"
+
+
+def stop_process_tree(proc: subprocess.Popen) -> None:
+    if proc.poll() is not None:
+        return
+    subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                   capture_output=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    proc.wait(timeout=10)

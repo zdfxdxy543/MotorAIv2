@@ -3,7 +3,7 @@ import re
 
 from PyQt5.QtCore import QThread, pyqtSignal
 
-from widgets.chat import call_ui_chat_model
+from widgets.chat import CancellableWorker, call_ui_chat_model
 
 
 ACTION_CONFIRM_GENERATE = 'confirm_generate'
@@ -297,7 +297,7 @@ def parse_route_payload(raw_text: str) -> dict:
     }
 
 
-class FlowRouteWorker(QThread):
+class FlowRouteWorker(CancellableWorker):
     routed = pyqtSignal(dict)
     failure = pyqtSignal(str)
 
@@ -311,6 +311,8 @@ class FlowRouteWorker(QThread):
         try:
             user_prompt = build_router_user_prompt(self.text, self.state, self.recent_history)
             result = call_ui_chat_model(user_prompt, ROUTER_SYSTEM_PROMPT, temperature=0.0)
-            self.routed.emit(parse_route_payload(result))
+            if not self.cancelled:
+                self.routed.emit(parse_route_payload(result))
         except Exception as exc:
-            self.failure.emit(str(exc))
+            if not self.cancelled:
+                self.failure.emit(str(exc))

@@ -312,6 +312,7 @@ class NewProjectDialog(QDialog):
                 (
                     f'项目已创建：{self.project_json_path}\n'
                     f'候选工作区：{competition_manifest.get("candidate_count", candidate_count)} 个\n'
+                    '每个候选的 project 下均包含 simulate 和 f280049c 工程\n'
                     f'候选策略文件：{project_root / "common" / "candidate_profiles.json"}'
                 ),
             )

@@ -319,6 +319,11 @@ class OptimizationTools:
         inspect evaluation_result/current_parameters/recent_history, decide an
         update, then call apply_parameter_update_and_record.
         """
+        if self._best_score is None:
+            saved = self._automation().get('_optimization_best_state') or {}
+            if isinstance(saved.get('score'), (int, float)) and isinstance(saved.get('parameters'), dict):
+                self._best_score = float(saved['score'])
+                self._best_parameters = dict(saved['parameters'])
         try:
             resolved_header_path = self._resolve_header_path(header_path)
             resolved_history_path = self._optimization_history_path(history_path)
@@ -450,6 +455,8 @@ class OptimizationTools:
             context["history_read_error"] = f"{type(exc).__name__}: {exc}"
 
         context["status"] = "ok" if context["evaluation_success"] else "evaluation_failed"
+        self._automation()['_optimization_best_state'] = {
+            'score': self._best_score, 'parameters': self._best_parameters}
         if context.get("parameters_rolled_back"):
             context["next_action"] = (
                 "Parameters were rolled back because this iteration degraded the score. "

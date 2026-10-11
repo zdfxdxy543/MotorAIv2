@@ -8,8 +8,10 @@ from typing import Any, Dict, List, Optional
 
 try:
     from .local_sil_runner import LocalSimulinkRunner
+    from .sil_session import run_matlab_job, validate_contract, write_contract
 except ImportError:
     from local_sil_runner import LocalSimulinkRunner
+    from sil_session import run_matlab_job, validate_contract, write_contract
 
 
 _THIS_DIR = Path(__file__).resolve().parent
@@ -119,6 +121,13 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Do not call open_system before simulation",
     )
+    parser.add_argument("--gmp-root", default=None)
+    parser.add_argument("--network-config", type=Path)
+    parser.add_argument("--expected-connection-id", default=None)
+    parser.add_argument("--timeout-sec", type=int, default=1800)
+    parser.add_argument("--prepare-only", action="store_true")
+    parser.add_argument('--batch', action='store_true', help='Use an owned MATLAB process for stoppable jobs')
+    parser.add_argument("--prepare-output", type=Path)
     return parser.parse_args()
 
 
@@ -132,7 +141,7 @@ def _write_json(path: str, payload: Dict[str, Any]) -> str:
     return output_path
 
 
-def main() -> None:
+def main() -> int:
     args = parse_args()
 
     if not args.model_path:
@@ -143,14 +152,30 @@ def main() -> None:
     if args.output:
         args.processed_output = args.output
 
+    network_path = args.network_config or Path(args.model_path).resolve().parent / "network.json"
+    network = json.loads(network_path.read_text(encoding="utf-8-sig")) if network_path.exists() else None
+    if args.prepare_only:
+        result = run_matlab_job(args.model_path, gmp_root=args.gmp_root, network=network,
+                                timeout_sec=args.timeout_sec)
+        if args.prepare_output:
+            write_contract(args.prepare_output, result["network_config"])
+        print(json.dumps(result["network_config"], ensure_ascii=False))
+        return 0
+    # A running controller must use the identity prepared from this exact saved model.
+    contract = validate_contract(network or {})
     scope_map = _load_scope_map(os.path.abspath(args.scope_map))
-    runner = LocalSimulinkRunner(matlab_session_name=args.session_name)
+    for output in (args.raw_output, args.processed_output):
+        Path(output).unlink(missing_ok=True)
+    runner = LocalSimulinkRunner(matlab_session_name=args.session_name, force_batch=args.batch)
 
     result = runner.run_model(
         model_path=args.model_path,
         scope_channel_map=scope_map,
         scope_vars=args.scope_vars,
         open_model_ui=not args.no_open_ui,
+        gmp_root=args.gmp_root, network_config=network,
+        expected_connection_id=args.expected_connection_id or contract["connection_id"],
+        timeout_sec=args.timeout_sec,
     )
 
     raw_payload, processed_payload = _split_result(result)
@@ -167,7 +192,8 @@ def main() -> None:
     print("raw scope keys:", sorted(raw_payload.get("raw_scopes", {}).keys()))
     print("scope_mapping_errors:", processed_payload.get("scope_mapping_errors", []))
     print("=" * 70)
+    return 0 if result.get("status") == "done" and not result.get("scope_mapping_errors") else 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

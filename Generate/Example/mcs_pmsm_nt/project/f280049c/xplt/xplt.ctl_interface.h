@@ -92,13 +92,13 @@ GMP_STATIC_INLINE void ctl_output_callback(void)
 //    DAC_setShadowValue(IRIS_DACA_BASE, smo.pos_out.elec_position * 2048 + 2048);
     DAC_setShadowValue(IRIS_DACA_BASE, spd_enc.encif.speed * 2048 + 2048);// rotor speed
 //    DAC_setShadowValue(IRIS_DACB_BASE, mech_ctrl.vel_traj.out * 2048 + 2048);// velocity trajectory
-    DAC_setShadowValue(IRIS_DACB_BASE, mech_ctrl.pos_if->position * 2048 + 2048);
+    DAC_setShadowValue(IRIS_DACB_BASE, pos_enc.encif.position * 2048 + 2048);
     //DAC_setShadowValue(IRIS_DACA_BASE, mtr_ctrl.idq_ref.dat[phase_d] * 2048 + 2048);
     //DAC_setShadowValue(IRIS_DACB_BASE, mtr_ctrl.idq0.dat[phase_d] * 2048 + 2048);
 
 #elif BUILD_LEVEL == 5
-    DAC_setShadowValue(IRIS_DACA_BASE, mech_ctrl.pos_if->position * 2048 + 2048);// rotor speed
-    DAC_setShadowValue(IRIS_DACB_BASE, mech_ctrl.pos_traj.out * 2048 + 2048);// velocity trajectory
+    DAC_setShadowValue(IRIS_DACA_BASE, pos_enc.encif.position * 2048 + 2048);// rotor position
+    DAC_setShadowValue(IRIS_DACB_BASE, spd_enc.encif.speed * 2048 + 2048);// rotor speed
 
 #endif // BUILD_LEVEL
 }

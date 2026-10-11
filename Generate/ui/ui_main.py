@@ -41,6 +41,8 @@ from panels.history import HistoryPanel, add_to_history
 from panels.result_charts import ResultChartsPanel
 from panels.tuning_result import TuningResultPanel
 from panels.workspace import Design3RightPanel
+from workflow.task_control import StopProcessWorker
+from Optimize.agent_optimize.agent_core.checkpoint import write_result_json
 from styles.theme import (
     app_qss,
     current_theme,
@@ -319,6 +321,8 @@ class MainWindow(QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.current_project_json_path = None
+        self._round_transition_token = 0
+        self._scheduled_next_round = None
 
         # ── load theme BEFORE creating any widgets ──
         self._apply_visual_theme()
@@ -395,6 +399,8 @@ class MainWindow(QMainWindow):
             run_tuning_callback=self.run_agent_optimization,
         )
         self.right_panel_widget.setStyleSheet(f'background:{current_theme().surface};border:none;')
+        self.right_panel_widget.main_program_panel.stop_tuning_callback = self.stop_agent_optimization
+        self.right_panel_widget.main_program_panel.resume_tuning_callback = self.resume_agent_optimization
         self.right_panel_widget.set_controller_panel(self.controller_panel)
         self.right_panel_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.right_panel_widget.setMinimumWidth(0)
@@ -444,6 +450,8 @@ class MainWindow(QMainWindow):
         self.history_panel = HistoryPanel(
             on_project_selected=self._on_history_project_selected,
             on_project_opened=self._on_history_project_opened,
+            can_delete_project=self._can_delete_history_project,
+            on_project_deleted=self._on_history_project_deleted,
         )
         self.history_panel.setMinimumWidth(200)
 
@@ -498,6 +506,9 @@ class MainWindow(QMainWindow):
         dialog.exec_()
 
     def open_new_project_dialog(self):
+        if self.right_panel().main_program_panel._assistant_busy() or self.right_panel().main_program_panel._stopping:
+            self.right_panel().main_program_panel._append_notice('请先停止当前任务，再新建项目。')
+            return
         dialog = NewProjectDialog(self)
         if dialog.exec_() == QDialog.Accepted and dialog.project_json_path:
             self.current_project_json_path = Path(dialog.project_json_path)
@@ -552,7 +563,7 @@ class MainWindow(QMainWindow):
 
         return process, stdout_path, stderr_path
 
-    def run_agent_optimization(self, round_number: int = 0):
+    def run_agent_optimization(self, round_number: int = 0, resume: bool = False):
         project_json_path = self.get_current_project_json_path()
         if not project_json_path:
             QMessageBox.warning(self, '提示', '请先打开或创建一个项目文件')
@@ -580,48 +591,69 @@ class MainWindow(QMainWindow):
                 stdout_path = log_dir / 'competition_runner_stdout.txt'
                 stderr_path = log_dir / 'competition_runner_stderr.txt'
 
-                # 如果已有调优进程在运行，先终止旧进程
+                # A new request must not leave an old controller/MATLAB tree behind.
                 old_proc = getattr(self, '_competition_process', None)
                 if old_proc is not None and old_proc.state() != QProcess.NotRunning:
-                    old_proc.kill()
-                    old_proc.waitForFinished(3000)
+                    self.right_panel().main_program_panel._append_notice('调优仍在运行，请先点击停止。')
+                    return
 
                 self._competition_process = QProcess(self)
                 self._competition_process.setProcessChannelMode(QProcess.SeparateChannels)
                 self._competition_process.setWorkingDirectory(str(MOTORAI_ROOT))
 
-                self._competition_process.setStandardOutputFile(str(stdout_path))
+                stdout_path.write_bytes(b'')
+                proc = self._competition_process
+                proc._motorai_stdout_path = stdout_path
+                proc._motorai_progress_buffer = b''
+                proc.readyReadStandardOutput.connect(
+                    lambda: self._read_competition_progress(proc, stdout_path)
+                )
                 self._competition_process.setStandardErrorFile(str(stderr_path))
                 self._competition_process.finished.connect(
                     lambda exit_code, exit_status:
                         self._on_competition_finished(exit_code, exit_status,
                                                        project_json_path)
                 )
+                proc.errorOccurred.connect(lambda error: self._on_competition_error(proc, error))
 
                 # 确定当前轮次：手动点击永远从 1 开始，自动继续才传具体轮次
                 if round_number <= 0:
                     current_round = 1
                 else:
                     current_round = round_number
+                proc._motorai_round = current_round
+                proc._motorai_project = str(project_json_path)
+                proc._motorai_stop_requested = False
+                self._round_transition_token = getattr(self, '_round_transition_token', 0) + 1
+                self._scheduled_next_round = None
 
                 cmd_args = [
+                    '-u',
                     str(runner_script),
                     str(project_json_path),
                     '--candidates', str(candidate_count),
                     '--parallel', '2',
                     '--optimize-parallel', '1',
                     '--round', str(current_round),
-                    '--force-next-round',
+                    '--single-round',
                 ]
                 if current_round <= 1:
                     cmd_args.append('--skip-generate')
+                if resume:
+                    cmd_args.append('--resume')
+                else:
+                    (log_dir / 'paused_task.json').unlink(missing_ok=True)
 
                 self._competition_process.start(sys.executable, cmd_args)
                 right_panel = self.right_panel()
                 if right_panel is not None:
+                    right_panel.main_program_panel._paused_operation = None
+                    right_panel.main_program_panel.set_tuning_active(True)
                     try:
                         right_panel.main_program_panel._append_debug(
-                            f'第 {current_round} 轮调优已启动（后台运行中）...')
+                            f'第 {current_round} 轮调优已启动：{candidate_count} 个候选方案串行运行，'
+                            f'每个最多 {int(project_data.get("max_iterations") or 1)} 次迭代。'
+                            '进度将随运行阶段更新，单次仿真可能需要数分钟。')
                         right_panel.main_program_panel._set_status_text(
                             f'状态：第 {current_round} 轮调优进行中')
                     except RuntimeError:
@@ -637,10 +669,16 @@ class MainWindow(QMainWindow):
                 return
 
             _process, stdout_path, stderr_path = self._launch_background_script(
-                [sys.executable, str(run_agent_script), str(project_json_path)],
+                [sys.executable, str(run_agent_script), str(project_json_path)] + (['--resume'] if resume else []),
                 cwd=run_agent_script.parent,
                 log_name='run_agent',
             )
+            self._background_agent_process = _process
+            self._background_agent_project = str(project_json_path)
+            self.right_panel().main_program_panel.set_tuning_active(True)
+            self._agent_poll_timer = QTimer(self)
+            self._agent_poll_timer.timeout.connect(self._poll_background_agent)
+            self._agent_poll_timer.start(200)
             QMessageBox.information(
                 self,
                 '已启动',
@@ -649,15 +687,55 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, '错误', f'启动失败：{type(exc).__name__}: {exc}')
 
+    def _read_competition_progress(self, process, stdout_path):
+        """Save all stdout and show only concise stage messages in the UI."""
+        data = bytes(process.readAllStandardOutput())
+        if not data:
+            return
+        with Path(stdout_path).open('ab') as output:
+            output.write(data)
+        # Keep bytes until a complete line arrives, including split UTF-8 characters.
+        lines = (getattr(process, '_motorai_progress_buffer', b'') + data).split(b'\n')
+        process._motorai_progress_buffer = lines.pop()
+        right_panel = self.right_panel()
+        if right_panel is None:
+            return
+        for line in lines:
+            if line.startswith(b'[progress] '):
+                message = line[11:].decode('utf-8', errors='replace').strip()
+                try:
+                    right_panel.main_program_panel._append_debug(message)
+                    right_panel.main_program_panel._set_status_text(f'状态：{message}')
+                except RuntimeError:
+                    return
+
+    def _on_competition_error(self, process, error):
+        if error != QProcess.FailedToStart or process is not getattr(self, '_competition_process', None):
+            return
+        self._competition_process = None
+        panel = self.right_panel().main_program_panel
+        panel.set_tuning_active(False)
+        panel._append_error('调优进程启动失败。', process.errorString())
+        process.deleteLater()
+
     def _on_competition_finished(self, exit_code, exit_status, project_json_path):
         """所有 candidate 调优完成后，读取结果并自动决定是否继续下一轮。"""
         # 清理进程引用
         proc = getattr(self, '_competition_process', None)
+        launched_round = getattr(proc, '_motorai_round', 1)
+        stopped = getattr(proc, '_motorai_stop_requested', False)
         if proc is not None:
+            self._read_competition_progress(proc, proc._motorai_stdout_path)
             proc.deleteLater()
             self._competition_process = None
 
+        if stopped:
+            # Tree cleanup owns the completion notification for a user pause.
+            return
+
         project_dir = Path(project_json_path).parent
+        if exit_code == 0:
+            (project_dir / 'log/ui/paused_task.json').unlink(missing_ok=True)
 
         # 读取最新已完成的轮次反馈
         rounds_root = project_dir / 'rounds'
@@ -677,14 +755,16 @@ class MainWindow(QMainWindow):
                     except Exception:
                         pass
                     break
-        if current_round <= 0:
-            current_round = 1
+        if current_round != launched_round:
+            current_round = launched_round
+            feedback = {}
 
         winner = feedback.get('winner', {})
         scoreboard = feedback.get('scoreboard', [])
         satisfied = feedback.get('requirement_satisfied', False)
 
-        lines = [f'第 {current_round} 轮调优已完成。']
+        lines = [f'第 {current_round} 轮调优已完成。' if exit_code == 0
+                 else f'第 {current_round} 轮调优失败。']
         if winner:
             lines.append(f'最高分：{_short_id(winner["candidate_id"])}（{winner["overall_score"]} 分）')
         if scoreboard:
@@ -694,6 +774,14 @@ class MainWindow(QMainWindow):
 
         if exit_code != 0:
             lines.append(f'进程异常退出（返回码 {exit_code}）')
+            stderr_path = project_dir / 'log' / 'ui' / 'competition_runner_stderr.txt'
+            try:
+                error_tail = stderr_path.read_text(encoding='utf-8', errors='replace')[-3000:].strip()
+                if error_tail:
+                    lines.append(error_tail)
+            except OSError:
+                pass
+            lines.append(f'详细日志：{project_dir / "candidates"} 下各方案的 log/optimize。')
         elif satisfied:
             lines.append('停止条件已满足，迭代结束。')
 
@@ -704,7 +792,8 @@ class MainWindow(QMainWindow):
             if right_panel is not None:
                 right_panel.main_program_panel._append_notice(message)
                 right_panel.main_program_panel._set_status_text(
-                    f'状态：第 {current_round} 轮完成（条件已满足）' if satisfied
+                    f'状态：第 {current_round} 轮失败' if exit_code != 0
+                    else f'状态：第 {current_round} 轮完成（条件已满足）' if satisfied
                     else f'状态：第 {current_round} 轮完成'
                 )
         except RuntimeError:
@@ -731,7 +820,10 @@ class MainWindow(QMainWindow):
                 )
             except RuntimeError:
                 return
-            QTimer.singleShot(500, lambda: self._start_next_round(current_round + 1))
+            token = self._round_transition_token
+            self._scheduled_next_round = (str(project_json_path), current_round + 1)
+            QTimer.singleShot(500, lambda: self._start_next_round(current_round + 1)
+                              if token == self._round_transition_token else None)
         elif max_rounds > 0 and current_round >= max_rounds and not satisfied:
             try:
                 right_panel.main_program_panel._append_notice(
@@ -739,40 +831,127 @@ class MainWindow(QMainWindow):
                 )
             except RuntimeError:
                 pass
+        if self._scheduled_next_round is None:
+            remote_pending = list(project_dir.glob('candidates/*/log/optimize/simulation/remote_active.json'))
+            right_panel.main_program_panel.set_tuning_active(bool(remote_pending))
+            if remote_pending:
+                right_panel.main_program_panel._append_notice('远端任务状态尚未确认，点击停止可以清理本次远端任务。')
 
     def _start_next_round(self, next_round: int):
         """生成下一轮策略并自动启动调优。"""
         project_json_path = self.get_current_project_json_path()
         if not project_json_path:
             return
-        project_dir = Path(project_json_path).parent
-        next_profiles = project_dir / 'rounds' / f'round_{next_round:02d}' / 'candidate_profiles.json'
-        right_panel = self.right_panel()
-
-        # 如果策略文件不存在，先生成
-        if not next_profiles.exists():
-            try:
-                if right_panel is not None:
-                    right_panel.main_program_panel._append_debug(
-                        f'正在生成第 {next_round} 轮方案策略（需要调用 LLM）...'
-                    )
-                from Competition.next_round_strategy import generate_next_round_strategy
-                generate_next_round_strategy(project_json_path,
-                                             from_round=next_round - 1,
-                                             to_round=next_round)
-            except Exception as exc:
-                if right_panel is not None:
-                    right_panel.main_program_panel._append_error(
-                        f'无法生成第 {next_round} 轮策略：{exc}')
-                return
-
-        # 直接启动，不弹窗
+        # Keep LLM work out of the GUI thread so the stop button stays responsive.
         self.run_agent_optimization(round_number=next_round)
+
+    def stop_agent_optimization(self):
+        self._round_transition_token += 1
+        proc = getattr(self, '_competition_process', None)
+        scheduled = self._scheduled_next_round
+        self._scheduled_next_round = None
+        project = self.get_current_project_json_path()
+        round_number = getattr(proc, '_motorai_round', scheduled[1] if scheduled else
+                               getattr(self, '_paused_tuning_round', 1))
+        self._paused_tuning_round = round_number
+        if proc is not None:
+            proc._motorai_stop_requested = True
+            project = proc._motorai_project
+        marker = Path(project).parent / 'log/ui/paused_task.json'
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        write_result_json(marker, {'project': str(project), 'round': round_number})
+        background = getattr(self, '_background_agent_process', None)
+        pid = int(proc.processId()) if proc is not None and proc.state() != QProcess.NotRunning else (
+            background.pid if background is not None and background.poll() is None else 0)
+        if proc is not None and proc.state() == QProcess.Starting and not pid:
+            QTimer.singleShot(50, self.stop_agent_optimization)
+            return
+        remote_markers = list(Path(project).parent.glob('candidates/*/log/optimize/simulation/remote_active.json'))
+        if not pid and not remote_markers:
+            self._stop_worker = None
+            self._on_task_tree_stopped()
+            return
+        self._stop_worker = StopProcessWorker(pid, self, remote_markers=remote_markers,
+                                              remote_marker_root=Path(project).parent)
+        self._stop_worker.finished.connect(self._on_task_tree_stopped)
+        self._stop_worker.start()
+
+    def _on_task_tree_stopped(self):
+        worker = getattr(self, '_stop_worker', None)
+        proc = getattr(self, '_competition_process', None)
+        background = getattr(self, '_background_agent_process', None)
+        still_running = ((proc is not None and proc.state() != QProcess.NotRunning)
+                         or (background is not None and background.poll() is None))
+        panel = self.right_panel().main_program_panel
+        remote_pending = worker is not None and any(Path(marker).exists() for marker in worker.remote_markers)
+        if worker is not None and worker.error and (still_running or remote_pending):
+            panel._stopping = False
+            panel._append_error('停止未能完成，请重试；远端模式需部署支持停止的新 worker。', worker.error)
+            return
+        if still_running:
+            if worker is not None and not worker.error:
+                QTimer.singleShot(100, self._on_task_tree_stopped)
+                return
+            panel._stopping = False
+            panel._append_error('停止任务失败，请重试。', getattr(worker, 'error', ''))
+            return
+        panel.set_tuning_active(False)
+        project = self.get_current_project_json_path()
+        for result_file in Path(project).parent.glob('candidates/*/log/optimize/tuning_result.json'):
+            try:
+                result = json.loads(result_file.read_text(encoding='utf-8'))
+                if result.get('status') == 'running':
+                    result['status'] = 'paused'
+                    write_result_json(result_file, result)
+            except (OSError, ValueError):
+                pass
+        panel._append_notice('调优已暂停，已完成的迭代和参数已保留。输入“继续运行”可恢复；中断的仿真会重新执行。')
+
+    def resume_agent_optimization(self):
+        project = self.get_current_project_json_path()
+        marker = Path(project).parent / 'log/ui/paused_task.json'
+        if not marker.exists():
+            self.right_panel().main_program_panel._append_notice('没有暂停的调优任务。')
+            return
+        try:
+            state = json.loads(marker.read_text(encoding='utf-8'))
+            round_number = int(state['round'])
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            self.right_panel().main_program_panel._append_error('读取暂停记录失败。', str(exc))
+            return
+        self.run_agent_optimization(round_number=round_number, resume=True)
+
+    def _poll_background_agent(self):
+        proc = getattr(self, '_background_agent_process', None)
+        if proc is not None and proc.poll() is not None:
+            self._agent_poll_timer.stop()
+            if not getattr(self, '_stop_worker', None) or not self._stop_worker.isRunning():
+                self.right_panel().main_program_panel.set_tuning_active(False)
+
+    def closeEvent(self, event):
+        panel = self.right_panel().main_program_panel
+        if panel._assistant_busy() or panel._stopping:
+            if not panel._stopping:
+                panel.stop_current_task()
+            event.ignore()
+            QTimer.singleShot(200, self._close_after_tasks)
+            return
+        super().closeEvent(event)
+
+    def _close_after_tasks(self):
+        panel = self.right_panel().main_program_panel
+        if panel._stopping:
+            QTimer.singleShot(200, self._close_after_tasks)
+        elif not panel._assistant_busy():
+            self.close()
 
     def _read_project_open_root(self):
         return str(get_output_root(load_settings()))
 
     def open_project_json(self):
+        if self.right_panel().main_program_panel._assistant_busy() or self.right_panel().main_program_panel._stopping:
+            self.right_panel().main_program_panel._append_notice('请先停止当前任务，再切换项目。')
+            return
         default_dir = self._read_project_open_root()
         file_path, _ = QFileDialog.getOpenFileName(self, '选择项目 JSON 文件', default_dir, 'JSON Files (*.json)')
         if not file_path:
@@ -797,8 +976,27 @@ class MainWindow(QMainWindow):
         """Single-click on a history item: info is shown by the panel itself."""
         pass
 
+    def _can_delete_history_project(self, json_path: Path) -> bool:
+        current = self.get_current_project_json_path()
+        if current and Path(current).resolve().is_relative_to(json_path.resolve().parent):
+            panel = self.right_panel().main_program_panel
+            return not (panel._assistant_busy() or panel._stopping)
+        return True
+
+    def _on_history_project_deleted(self, json_path: Path) -> None:
+        current = self.get_current_project_json_path()
+        if current and Path(current).resolve().is_relative_to(json_path.resolve().parent):
+            self.current_project_json_path = None
+            self.action_network_config.setEnabled(False)
+            self._refresh_project_panels()
+            self._load_panel_data()
+
     def _on_history_project_opened(self, json_path: Path) -> None:
         """Double-click on a history item: load the project."""
+        panel = self.right_panel().main_program_panel
+        if panel._assistant_busy() or panel._stopping:
+            panel._append_notice('请先停止当前任务，再切换项目。')
+            return
         try:
             data = json.loads(json_path.read_text(encoding="utf-8"))
             if not isinstance(data, dict):

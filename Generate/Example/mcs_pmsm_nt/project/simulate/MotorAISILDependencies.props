@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <MotorAISILTriplet Condition="'$(Platform)'=='x64'">x64-windows</MotorAISILTriplet>
+    <MotorAISILTriplet Condition="'$(Platform)'=='Win32'">x86-windows</MotorAISILTriplet>
+    <MotorAISILDependencies>$(GMP_SIL_DEPENDENCY_ROOT)</MotorAISILDependencies>
+    <MotorAISILDependencies Condition="'$(MotorAISILDependencies)'=='' and Exists('$(GMP_PRO_LOCATION)\bin\vcpkg_installed\$(MotorAISILTriplet)\$(MotorAISILTriplet)\include\asio.hpp')">$(GMP_PRO_LOCATION)\bin\vcpkg_installed\$(MotorAISILTriplet)\$(MotorAISILTriplet)</MotorAISILDependencies>
+    <MotorAISILDependencies Condition="'$(MotorAISILDependencies)'=='' and Exists('$(ProjectDir)vcpkg_installed\$(MotorAISILTriplet)\$(MotorAISILTriplet)\include\asio.hpp')">$(ProjectDir)vcpkg_installed\$(MotorAISILTriplet)\$(MotorAISILTriplet)</MotorAISILDependencies>
+    <MotorAISILDependencies Condition="'$(MotorAISILDependencies)'=='' and Exists('$(ProjectDir)vcpkg_installed\$(MotorAISILTriplet)\include\asio.hpp')">$(ProjectDir)vcpkg_installed\$(MotorAISILTriplet)</MotorAISILDependencies>
+    <VcpkgEnabled Condition="'$(MotorAISILDependencies)'!=''">false</VcpkgEnabled>
+    <VcpkgEnableManifest Condition="'$(MotorAISILDependencies)'!=''">false</VcpkgEnableManifest>
+    <MotorAISILLibraryDirectory>$(MotorAISILDependencies)\lib</MotorAISILLibraryDirectory>
+    <MotorAISILLibraryDirectory Condition="'$(Configuration)'=='Debug'">$(MotorAISILDependencies)\debug\lib</MotorAISILLibraryDirectory>
+    <MotorAISILBinDirectory>$(MotorAISILDependencies)\bin</MotorAISILBinDirectory>
+    <MotorAISILBinDirectory Condition="'$(Configuration)'=='Debug'">$(MotorAISILDependencies)\debug\bin</MotorAISILBinDirectory>
+    <MotorAISILFmt>fmt.lib</MotorAISILFmt>
+    <MotorAISILFmt Condition="'$(Configuration)'=='Debug'">fmtd.lib</MotorAISILFmt>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(MotorAISILDependencies)'!=''">
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(MotorAISILDependencies)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <AdditionalLibraryDirectories>$(MotorAISILLibraryDirectory);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>$(MotorAISILFmt);ws2_32.lib;iphlpapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <Target Name="MotorAICopySILRuntime" AfterTargets="Build" Condition="'$(MotorAISILDependencies)'!=''">
+    <ItemGroup><MotorAISILRuntime Include="$(MotorAISILBinDirectory)\*.dll" /></ItemGroup>
+    <Copy SourceFiles="@(MotorAISILRuntime)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+  </Target>
+</Project>

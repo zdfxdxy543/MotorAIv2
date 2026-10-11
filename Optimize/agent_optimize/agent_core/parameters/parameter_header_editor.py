@@ -541,7 +541,9 @@ def _read_text(path: Path) -> str:
 
 def _write_text(path: Path, text: str) -> None:
     try:
-        path.write_text(text, encoding="utf-8", newline="")
+        temporary = path.with_name(path.name + '.tmp')
+        temporary.write_text(text, encoding="utf-8", newline="")
+        temporary.replace(path)
     except OSError as exc:
         raise ParameterHeaderFileError(f"Failed to write header file {path}: {exc}") from exc
 

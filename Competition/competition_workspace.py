@@ -37,6 +37,7 @@ from Optimize.config_project import (  # noqa: E402
     resolve_gmp_root,
     rewrite_bat_variables,
 )
+from Competition.f280049c_project import copy_f280049c_project  # noqa: E402
 
 
 COMMON_PROJECT_FIELDS = [
@@ -69,6 +70,7 @@ class CandidatePaths:
     root: Path
     src: Path
     simulate: Path
+    f280049c: Path
     log: Path
     log_generate: Path
     log_optimize: Path
@@ -269,6 +271,7 @@ def candidate_paths(project_root: Path, index: int) -> CandidatePaths:
         root=root,
         src=root / "src",
         simulate=root / "project" / "simulate",
+        f280049c=root / "project" / "f280049c",
         log=root / "log",
         log_generate=root / "log" / "generate",
         log_optimize=root / "log" / "optimize",
@@ -752,6 +755,7 @@ def init_candidates(
     if candidate_count < 1:
         raise ValueError("candidate_count must be >= 1")
 
+    configured_gmp = base_project.get('gmp_path')
     write_common_requirement_snapshot(project_json, base_project)
     shared_context_files = copy_shared_context_json_files(project_root, project_json, template_root)
     candidate_profiles = write_candidate_profiles(project_root, candidate_count)
@@ -768,6 +772,9 @@ def init_candidates(
 
         copy_required_directory(source_src, paths.src, force=force, project_root=project_root)
         copy_required_directory(source_simulate, paths.simulate, force=force, project_root=project_root)
+        copy_f280049c_project(
+            paths.root, template=template_root,
+            gmp_root=Path(configured_gmp) if configured_gmp else None)
 
         for log_dir in (
             paths.log_generate,
@@ -796,6 +803,7 @@ def init_candidates(
                 "candidate_json": str(paths.candidate_json.resolve()),
                 "src": str(paths.src.resolve()),
                 "simulate": str(paths.simulate.resolve()),
+                "f280049c": str(paths.f280049c.resolve()),
                 "log": str(paths.log.resolve()),
                 "optimize": optimize_config,
             }
@@ -897,6 +905,7 @@ def build_candidate_agent_project(candidate_json: Path) -> dict[str, Any]:
             "parameter_header": str(parameter_header),
             "optimization_history": "optimization_history.jsonl",
             "sim_model_path": str(sim_model),
+            "gmp_root": resolve_gmp_root(candidate, str(sim_model.parent)),
             "scope_map": "simulation/scope_channel_map.json",
             "build_agent_log": "build/build.log",
             "run_exe_log": "build/run_exe.log",
@@ -923,6 +932,9 @@ setlocal EnableExtensions
 
 set "SCRIPT_DIR=%~dp0"
 set "MODEL_PATH={sim_model}"
+set "GMP_ROOT={resolve_gmp_root(candidate, str(sim_model.parent))}"
+set "EXPECTED_ID=%~3"
+if not "%~2"=="" set "GMP_ROOT=%~2"
 
 if not "%~1"=="" (
     set "MODEL_PATH=%~1"
@@ -932,7 +944,7 @@ set "SCOPE_MAP=%SCRIPT_DIR%simulation\\scope_channel_map.json"
 if not exist "%SCRIPT_DIR%simulation" mkdir "%SCRIPT_DIR%simulation"
 if not exist "%SCOPE_MAP%" echo {{}}>"%SCOPE_MAP%"
 
-python "{run_local_job}" --model-path "%MODEL_PATH%" --scope-map "%SCOPE_MAP%" --raw-output "%SCRIPT_DIR%{raw_output}" --processed-output "%SCRIPT_DIR%{processed_output}"
+python "{run_local_job}" --batch --model-path "%MODEL_PATH%" --gmp-root "%GMP_ROOT%" --expected-connection-id "%EXPECTED_ID%" --scope-map "%SCOPE_MAP%" --raw-output "%SCRIPT_DIR%{raw_output}" --processed-output "%SCRIPT_DIR%{processed_output}"
 exit /b %ERRORLEVEL%
 """
     bat_path.parent.mkdir(parents=True, exist_ok=True)

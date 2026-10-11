@@ -23,7 +23,7 @@ extern "C"
 // select ADC PTR interface
 #include <ctl/component/interface/adc_ptr_channel.h>
 
-#include <core/dev/datalink.h>
+#include <core/dev/datalink/datalink.h>
 
 //=================================================================================================
 // definitions of peripheral
@@ -45,6 +45,9 @@ extern adc_gt idc_src;
 #define DLOG_MEM_LENGTH 100
 extern ctrl_gt dlog_mem1[DLOG_MEM_LENGTH];
 extern ctrl_gt dlog_mem2[DLOG_MEM_LENGTH];
+
+void flush_dl_tx_buffer(void);
+void flush_dl_rx_buffer(void);
 
 #ifdef __cplusplus
 }

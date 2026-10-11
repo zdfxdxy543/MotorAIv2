@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import hmac
 import subprocess
 import sys
 import threading
@@ -10,6 +11,8 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+
+from agent_silhelper.sil_session import network_options, run_matlab_job, validate_contract
 
 
 WORKER_DIR = Path(__file__).resolve().parent
@@ -70,6 +73,9 @@ class SilWorkerState:
     def __init__(self, config: dict[str, Any]) -> None:
         self.config = config
         self.lock = threading.Lock()
+        self.active_lock = threading.Lock()
+        self.active_job = None
+        self.cancelled_jobs = {}
         self.worker_id = str(config.get("worker_id") or "silworker")
         self.job_root = _resolve_worker_path(str(config.get("job_root") or "jobs"))
         self.job_root.mkdir(parents=True, exist_ok=True)
@@ -95,6 +101,9 @@ class SilWorkerState:
 
         return model_path
 
+    def prepare_simulation(self, request: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        return self.run_simulation({**request, "_prepare_only": True})
+
     def run_simulation(self, request: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         if not HELPER_SCRIPT.exists():
             return 500, {
@@ -110,10 +119,61 @@ class SilWorkerState:
             }
 
         started_at = time.time()
+        job = {'job_id': str(request.get('job_id') or uuid.uuid4().hex),
+               'cancel_token': str(request.get('cancel_token') or ''),
+               'cancelled': threading.Event(), 'done': threading.Event(), 'process': None}
+        with self.active_lock:
+            now = time.monotonic()
+            self.cancelled_jobs = {key: expiry for key, expiry in self.cancelled_jobs.items() if expiry > now}
+            if (job['job_id'], job['cancel_token']) in self.cancelled_jobs:
+                self.lock.release()
+                return 409, {'ok': False, 'error': 'job was cancelled before it started'}
+            self.active_job = job
         try:
-            return self._run_simulation_locked(request, started_at)
+            return self._run_simulation_locked({**request, 'job_id': job['job_id']}, started_at)
         finally:
+            with self.active_lock:
+                self.active_job = None
+                job['done'].set()
             self.lock.release()
+
+    @staticmethod
+    def _stop_process(process):
+        if process is not None and process.poll() is None:
+            subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'],
+                           capture_output=True, timeout=20,
+                           creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            process.wait(timeout=20)
+
+    def _track_process(self, process):
+        with self.active_lock:
+            job = self.active_job
+            job['process'] = process
+            cancelled = job['cancelled'].is_set()
+        if cancelled:
+            self._stop_process(process)
+
+    def cancel_simulation(self, request):
+        with self.active_lock:
+            job = self.active_job
+            if job is None:
+                # The cancellation HTTP handler may run before the original
+                # handler has registered its job. Remember this exact request.
+                job_id = str(request.get('job_id') or '')
+                token = str(request.get('cancel_token') or '')
+                if job_id and token:
+                    self.cancelled_jobs[(job_id, token)] = time.monotonic() + 300
+                return 200, {'ok': True, 'status': 'already_finished'}
+            token = str(request.get('cancel_token') or '')
+            if (str(request.get('job_id') or '') != job['job_id'] or not job['cancel_token']
+                    or not hmac.compare_digest(token, job['cancel_token'])):
+                return 409, {'ok': False, 'error': 'cancel request does not match the active job'}
+            job['cancelled'].set()
+            process = job['process']
+        self._stop_process(process)
+        if not job['done'].wait(timeout=20):
+            return 504, {'ok': False, 'error': 'remote job has not stopped yet'}
+        return 200, {'ok': True, 'status': 'cancelled', 'job_id': job['job_id']}
 
     def _run_simulation_locked(
         self,
@@ -126,6 +186,21 @@ class SilWorkerState:
             request.get("remote_model_path") or request.get("model_path")
         )
         network_config = self._network_config_from_request(request)
+        if request.get("_prepare_only"):
+            result = run_matlab_job(model_path, gmp_root=self.config.get("gmp_root"),
+                                    network=network_config,
+                                    scope_vars=request.get("scope_vars") or list(request.get("scope_map") or {}),
+                                    process_started=self._track_process,
+                                    timeout_sec=int(request.get("timeout_sec") or self.config.get("default_timeout_sec") or 1800))
+            return 200, {"ok": True, "worker_id": self.worker_id,
+                         "network_config": result["network_config"]}
+
+        network_path = model_path.parent / "network.json"
+        contract = validate_contract(json.loads(network_path.read_text(encoding="utf-8-sig")))
+        if not request.get("expected_connection_id") or contract["connection_id"] != request["expected_connection_id"]:
+            return 409, {"ok": False, "error": "SIL model changed; prepare it and restart the controller"}
+        if network_options(contract) != network_config:
+            return 409, {"ok": False, "error": "SIL network options changed since preparation"}
 
         scope_map = request.get("scope_map")
         if scope_map is None:
@@ -177,11 +252,6 @@ class SilWorkerState:
             json.dumps(scope_map, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        network_path = model_path.parent / "network.json"
-        network_path.write_text(
-            json.dumps(network_config, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
 
         python_executable = str(self.config.get("python_executable") or sys.executable)
         command = [
@@ -195,8 +265,14 @@ class SilWorkerState:
             str(raw_output),
             "--processed-output",
             str(processed_output),
+            "--expected-connection-id", contract["connection_id"],
+            "--timeout-sec", str(timeout_sec),
         ]
-        if session_name:
+        if self.config.get("gmp_root"):
+            command.extend(["--gmp-root", str(self.config["gmp_root"])])
+        if request.get('cancel_token'):
+            command.append('--batch')
+        elif session_name:
             command.extend(["--session-name", session_name])
         if no_open_ui:
             command.append("--no-open-ui")
@@ -204,16 +280,21 @@ class SilWorkerState:
             command.extend(["--scope-vars", *scope_vars])
 
         try:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 command,
                 cwd=str(WORKER_DIR),
-                capture_output=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=timeout_sec,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
+            self._track_process(process)
+            stdout, stderr = process.communicate(timeout=timeout_sec + 60)
+            completed = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
         except subprocess.TimeoutExpired as exc:
+            self._stop_process(process)
+            process.communicate()
             stdout = exc.stdout or ""
             stderr = exc.stderr or ""
             stdout_path.write_text(str(stdout), encoding="utf-8")
@@ -281,21 +362,7 @@ class SilWorkerState:
         network = request.get("network_config")
         if not isinstance(network, dict):
             network = {}
-        return {
-            "target_address": str(
-                network.get("target_address")
-                or request.get("target_address")
-                or "127.0.0.1"
-            ),
-            "receive_port": int(network.get("receive_port") or request.get("receive_port") or 12500),
-            "transmit_port": int(network.get("transmit_port") or request.get("transmit_port") or 12501),
-            "command_recv_port": int(
-                network.get("command_recv_port") or request.get("command_recv_port") or 12502
-            ),
-            "command_trans_port": int(
-                network.get("command_trans_port") or request.get("command_trans_port") or 12503
-            ),
-        }
+        return network_options({**request, **network})
 
 
 def make_handler(state: SilWorkerState) -> type[BaseHTTPRequestHandler]:
@@ -323,13 +390,16 @@ def make_handler(state: SilWorkerState) -> type[BaseHTTPRequestHandler]:
             self._json_response(404, {"ok": False, "error": "not found"})
 
         def do_POST(self) -> None:
-            if self.path.rstrip("/") != "/run_simulation":
+            if self.path.rstrip("/") not in ("/run_simulation", "/prepare_simulation", "/cancel_simulation"):
                 self._json_response(404, {"ok": False, "error": "not found"})
                 return
 
             try:
                 request = self._read_json_body()
-                status_code, payload = state.run_simulation(request)
+                operation = {'/prepare_simulation': state.prepare_simulation,
+                             '/run_simulation': state.run_simulation,
+                             '/cancel_simulation': state.cancel_simulation}[self.path.rstrip('/')]
+                status_code, payload = operation(request)
                 self._json_response(status_code, payload)
             except PermissionError as exc:
                 self._json_response(403, {"ok": False, "error": str(exc)})

@@ -30,6 +30,13 @@ set "SLN_DIR=%REPO_ROOT%\ctl\suite\mcs_pmsm_nt\project\simulate"
 set "FAC_DIR=%REPO_ROOT%\tools\facilities_generator"
 set "GMP_PRO_LOCATION=%REPO_ROOT%"
 
+rem Activate the configured GMP environment in this calling script.
+if exist "%GMP_PRO_LOCATION%\tools\gmp_installer\ensure_gmp_environment.bat" (
+    call "%GMP_PRO_LOCATION%\tools\gmp_installer\ensure_gmp_environment.bat"
+    if errorlevel 1 exit /b 20
+)
+
+
 rem Log directory required by agent:
 rem   <repo_root>\tools\agent\log\build
 set "LOG_DIR=%REPO_ROOT%\tools\agent\log\build"
@@ -46,7 +53,7 @@ if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
 
 if not exist "%SLN_PATH%" goto ERR_SLN
 if not exist "%FAC_DIR%" goto ERR_FAC_DIR
-if not exist "%FAC_DIR%\gmp_fac_generate_srcs_example.bat" goto ERR_FAC_BAT
+if not exist "%FAC_DIR%\src_mgr\framework_sync_src_v3.py" goto ERR_FAC_BAT
 
 if not exist "%XPLT_DIR%\xplt.config.h" goto ERR_XPLT_CONFIG
 if not exist "%CTL_SRC_DIR%\ctl_main.h" goto ERR_CTL_MAIN
@@ -70,8 +77,14 @@ echo [INFO] Configuration: %CONFIGURATION%
 echo [INFO] Platform: %PLATFORM%
 echo [INFO] Mode: build only
 
-where gmp_fac_generate_srcs_example.bat >nul 2>nul
-if errorlevel 1 goto ERR_FAC_BAT_NOT_IN_PATH
+
+rem Generate before MSBuild evaluates wildcard source items.
+if not exist "%SLN_DIR%\gmp_src_mgr\gmp_framework_config.json" exit /b 19
+if not exist "%SLN_DIR%\gmp_src_mgr\gmp_generate_src.bat" exit /b 19
+call "%SLN_DIR%\gmp_src_mgr\gmp_generate_src.bat"
+if errorlevel 1 exit /b 19
+if not exist "%SLN_DIR%\gmp_src_mgr\gmp_src\gmp_runtime.c" exit /b 19
+if not exist "%SLN_DIR%\gmp_src_mgr\gmp_src\ctl_component_interface.c" exit /b 19
 
 call :FIND_MSBUILD
 if errorlevel 1 goto ERR_MSBUILD
@@ -110,8 +123,8 @@ exit /b 0
 set "CURRENT=%~f1"
 
 :FIND_REPO_ROOT_LOOP
-if exist "%CURRENT%\tools\facilities_generator\gmp_fac_generate_srcs_example.bat" (
-    if exist "%CURRENT%\ctl\suite\mcs_pmsm_nt\project\simulate\GMP_Motor_Control_simulink.sln" (
+if exist "%CURRENT%\tools\facilities_generator\src_mgr\framework_sync_src_v3.py" (
+    if exist "%CURRENT%\gmp_core.h" (
         set "REPO_ROOT=%CURRENT%"
         exit /b 0
     )
@@ -154,8 +167,8 @@ echo [ERROR] Repo root not found.
 echo Search started from:
 echo "%SEARCH_START%"
 echo Expected to find both:
-echo tools\facilities_generator\gmp_fac_generate_srcs_example.bat
-echo ctl\suite\mcs_pmsm_nt\project\simulate\GMP_Motor_Control_simulink.sln
+echo tools\facilities_generator\src_mgr\framework_sync_src_v3.py
+echo gmp_core.h
 exit /b 10
 
 
@@ -172,13 +185,13 @@ exit /b 12
 
 
 :ERR_FAC_BAT
-echo [ERROR] gmp_fac_generate_srcs_example.bat not found:
-echo "%FAC_DIR%\gmp_fac_generate_srcs_example.bat"
+echo [ERROR] src_mgr\framework_sync_src_v3.py not found:
+echo "%FAC_DIR%\src_mgr\framework_sync_src_v3.py"
 exit /b 13
 
 
 :ERR_FAC_BAT_NOT_IN_PATH
-echo [ERROR] gmp_fac_generate_srcs_example.bat is not available in PATH.
+echo [ERROR] src_mgr\framework_sync_src_v3.py is not available in PATH.
 echo Facilities generator dir:
 echo "%FAC_DIR%"
 exit /b 14

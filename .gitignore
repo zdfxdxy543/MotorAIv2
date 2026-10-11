@@ -14,12 +14,22 @@ venv/
 env/
 .env/
 
+Output/
+
+# Local code index
+/.codegraph/
+
+# Local UI history
+/Generate/ui/history.json
+/Generate/ui/history.json.tmp
+
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
+*.obj
 
 # OS
 .DS_Store

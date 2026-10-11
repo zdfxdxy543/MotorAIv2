@@ -25,35 +25,33 @@ def save_json_file(file_path: Path, data: Dict[str, Any]) -> None:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
+def gmp_root_markers(root: Path) -> tuple[Path, ...]:
+    """Stable source-manager and simulation files shared by old/new GMP."""
+    return tuple(root / relative for relative in (
+        'gmp_core.h',
+        'tools/facilities_generator/src_mgr/gmp_framework_dic.json',
+        'tools/facilities_generator/src_mgr/framework_sync_src_v3.py',
+        'csp/windows_simulink/GMPCorePropertySheet.props',
+        'tools/facilities_generator/GMPSrcGenPropertySheet.props',
+    ))
+
+
 def derive_gmp_root_from_sln_dir(sln_dir: str) -> str:
-    """Derive the GMP repository root from .../ctl/suite/<project>/project/simulate."""
     path = Path(sln_dir).expanduser().resolve()
-
     for candidate in (path, *path.parents):
-        facilities_bat = candidate / 'tools' / 'facilities_generator' / 'gmp_fac_generate_srcs_example.bat'
-        if facilities_bat.exists():
+        if all(marker.is_file() for marker in gmp_root_markers(candidate)):
             return str(candidate)
-
-    for candidate in (path, *path.parents):
-        if candidate.name.lower() == 'ctl':
-            return str(candidate.parent)
-
     raise ValueError(f"Unable to derive GMP root from sln_dir: {sln_dir}")
 
 
 def resolve_gmp_root(config: Dict[str, Any], sln_dir: str) -> str:
-    """Resolve GMP root from project JSON first, then fall back to sln_dir."""
     configured_root = str(config.get('gmp_path') or config.get('gmp_root') or '').strip()
     if configured_root:
         root = Path(configured_root).expanduser().resolve()
-        facilities_bat = root / 'tools' / 'facilities_generator' / 'gmp_fac_generate_srcs_example.bat'
-        if not facilities_bat.exists():
-            raise FileNotFoundError(
-                f"Configured gmp_path is not a valid GMP root: {root}\n"
-                f"Missing: {facilities_bat}"
-            )
+        missing = [str(marker) for marker in gmp_root_markers(root) if not marker.is_file()]
+        if missing:
+            raise FileNotFoundError(f"Configured GMP root is invalid: {root}\nMissing: " + "\n".join(missing))
         return str(root)
-
     return derive_gmp_root_from_sln_dir(sln_dir)
 
 
@@ -219,6 +217,7 @@ def modify_agent_project_json(
     src_folder_path: str,
     simulink_model_path: str,
     parameter_header_path: str,
+    gmp_root: str | None = None,
 ) -> None:
     """Modify agent_project.json with new paths."""
     data = load_json_file(agent_project_path)
@@ -234,6 +233,8 @@ def modify_agent_project_json(
     if 'automation' in data:
         data['automation']['sim_model_path'] = simulink_model_path
         data['automation']['parameter_header'] = parameter_header_path
+        if gmp_root:
+            data['automation']['gmp_root'] = gmp_root
         print(f"Updated agent_project.json: automation.sim_model_path = {simulink_model_path}")
         print(f"Updated agent_project.json: automation.parameter_header = {parameter_header_path}")
     else:
@@ -356,7 +357,7 @@ def main():
         print("Copied template files successfully")
         print()
         
-        modify_agent_project_json(agent_project_path, src_folder_path, simulink_model_path, parameter_header_path)
+        modify_agent_project_json(agent_project_path, src_folder_path, simulink_model_path, parameter_header_path, gmp_root)
         modify_build_sln_bat(build_sln_path, sln_dir, gmp_root)
         modify_run_local_quick_bat(run_local_quick_path, sln_dir)
         modify_start_exe_bat(start_exe_path, sln_dir, gmp_root)

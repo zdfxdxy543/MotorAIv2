@@ -5,10 +5,16 @@ import json
 import os
 import sys
 import time
+import uuid
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
+
+try:
+    from .sil_session import network_options, validate_contract
+except ImportError:
+    from sil_session import network_options, validate_contract
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -107,16 +113,13 @@ def _build_payload(
         "agent_project": str(agent_project_path),
     }
 
-    network_keys = (
-        "target_address",
-        "receive_port",
-        "transmit_port",
-        "command_recv_port",
-        "command_trans_port",
-    )
-    network_config = {key: backend[key] for key in network_keys if key in backend}
-    if network_config:
-        payload["network_config"] = network_config
+    payload["network_config"] = network_options(backend)
+    model = _resolve_config_path(agent_project_path.parent, str(automation["sim_model_path"]))
+    local_contract = model.parent / "network.json"
+    if local_contract.exists():
+        data = _load_json(local_contract)
+        if data.get("connection_id"):
+            payload["expected_connection_id"] = validate_contract(data)["connection_id"]
 
     for key in (
         "session_name",
@@ -128,6 +131,39 @@ def _build_payload(
             payload[key] = backend[key]
 
     return payload
+
+
+def _post_job(agent_project_path, worker_url, endpoint, payload, timeout):
+    # This file survives a local process stop so the UI can cancel the exact remote job.
+    marker = Path(agent_project_path).parent / 'simulation/remote_active.json'
+    if marker.exists():
+        previous = _load_json(marker)
+        cancelled = _post_json(previous['worker_url'].rstrip('/') + '/cancel_simulation',
+                               {'job_id': previous['job_id'], 'cancel_token': previous['cancel_token']}, 25)
+        if not cancelled.get('ok'):
+            raise RuntimeError('Previous remote job has not stopped; retry Stop before continuing')
+        marker.unlink(missing_ok=True)
+    payload['cancel_token'] = uuid.uuid4().hex
+    _atomic_write_json(marker, {'worker_url': worker_url, 'job_id': payload['job_id'],
+                               'cancel_token': payload['cancel_token']})
+    response = _post_json(f'{worker_url}/{endpoint}', payload, timeout)
+    marker.unlink(missing_ok=True)
+    return response
+
+
+def prepare_remote_simulation(agent_project_path: Path) -> dict[str, Any]:
+    project = _load_json(agent_project_path)
+    backend = project["automation"]["simulation_backend"]
+    url = str(backend.get("worker_url") or "").rstrip("/")
+    if not url:
+        raise ValueError("remote SIL preparation requires worker_url")
+    payload = _build_payload(agent_project=project, agent_project_path=agent_project_path,
+                             backend=backend, scope_map=_load_scope_map(_resolve_config_path(
+                                 agent_project_path.parent, project["automation"].get("scope_map", "simulation/scope_channel_map.json"))))
+    response = _post_job(agent_project_path, url, 'prepare_simulation', payload, int(payload['timeout_sec']) + 60)
+    if not response.get("ok"):
+        raise RuntimeError(f"worker preparation failed: {response}")
+    return validate_contract(response["network_config"])
 
 
 def run_remote_simulation(agent_project_path: Path) -> dict[str, Any]:
@@ -169,13 +205,11 @@ def run_remote_simulation(agent_project_path: Path) -> dict[str, Any]:
         backend=backend,
         scope_map=scope_map,
     )
+    if not payload.get("expected_connection_id"):
+        raise ValueError("Prepare the remote model before starting the controller")
 
     request_timeout = int(payload["timeout_sec"]) + int(backend.get("response_timeout_slack_sec") or 60)
-    response = _post_json(
-        f"{worker_url}/run_simulation",
-        payload,
-        timeout_sec=request_timeout,
-    )
+    response = _post_job(agent_project_path, worker_url, 'run_simulation', payload, request_timeout)
 
     if not bool(response.get("ok")):
         raise RuntimeError(f"worker returned failure: {json.dumps(response, ensure_ascii=False)}")
@@ -183,6 +217,8 @@ def run_remote_simulation(agent_project_path: Path) -> dict[str, Any]:
     processed_json = response.get("processed_json")
     if not isinstance(processed_json, dict):
         raise ValueError("worker response missing object field: processed_json")
+    if processed_json.get("status") != "done" or processed_json.get("scope_mapping_errors"):
+        raise RuntimeError(f"remote simulation did not produce valid signals: {processed_json.get('diagnostics')}")
 
     _atomic_write_json(processed_path, processed_json)
     return {

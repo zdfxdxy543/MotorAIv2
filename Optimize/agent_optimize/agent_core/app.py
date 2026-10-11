@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .config import ProjectContext, load_project_context
+from .checkpoint import job_signature, load_checkpoint, write_result_json
 from .llm import LLMClient
 from .prompts import SYSTEM_PROMPT
 from .tool_registry import ToolRegistry
@@ -167,6 +168,8 @@ def run_agent_turn(
         ]
 
     for tool_round in range(1, max_tool_rounds + 1):
+        if echo_tools:
+            print(f"[stage] 等待模型响应（工具轮次 {tool_round}/{max_tool_rounds}）。", flush=True)
         assistant_message = llm.ask(messages, tool_schemas)
         assistant_dict = _message_to_dict(assistant_message)
         messages.append(assistant_dict)
@@ -293,16 +296,6 @@ def load_job_json(job_file: Path) -> Dict[str, Any]:
         raise ValueError("job.stop_conditions must be an object when provided")
 
     return job
-
-
-def write_result_json(result_file: Path, result: Dict[str, Any]) -> None:
-    """Write tuning_result.json with stable UTF-8 formatting."""
-    result_file = result_file.expanduser().resolve()
-    result_file.parent.mkdir(parents=True, exist_ok=True)
-    result_file.write_text(
-        json.dumps(result, ensure_ascii=False, indent=2, default=str),
-        encoding="utf-8",
-    )
 
 
 def stop_condition_met(evaluation_result: Dict[str, Any], stop_conditions: Dict[str, Any]) -> bool:
@@ -577,6 +570,7 @@ def run_headless_job(
     llm: LLMClient,
     registry: ToolRegistry,
     ctx: ProjectContext,
+    resume: bool = False,
 ) -> int:
     """Run a tuning job JSON without interactive input and write tuning_result.json."""
     job_file = job_file.expanduser().resolve()
@@ -599,6 +593,7 @@ def run_headless_job(
         "schema_version": 1,
         "job_id": job.get("job_id"),
         "job_file": str(job_file),
+        "job_signature": job_signature(job),
         "evaluation_config_source": "job_file" if use_job_file_as_evaluation_config else "generated_or_configured",
         "status": "running",
         "stop_reason": None,
@@ -610,6 +605,15 @@ def run_headless_job(
         "errors": [],
         "assumptions": [],
     }
+    if resume:
+        saved = load_checkpoint(result_file, job_file, job)
+        if saved:
+            result.update(saved)
+            result.update(status='running', stop_reason=None, errors=[])
+            _ensure_automation_config(ctx)['_optimization_best_state'] = result.get('best_state', {})
+            print(f"[stage] 恢复任务，已完成 {result['iterations_completed']}/{max_iterations} 次迭代。", flush=True)
+        else:
+            print('[stage] 需求已变化或没有有效检查点，将保留当前参数并重新评价。', flush=True)
     write_result_json(result_file, result)
 
     # ── 注入 tuning_policy.allowed_parameters 到工具层（含自动补全） ──
@@ -720,6 +724,8 @@ def run_headless_job(
             ),
         },
     ]
+    if result.get('messages'):
+        messages = result['messages']
 
     try:
         if use_job_file_as_evaluation_config:
@@ -743,8 +749,9 @@ def run_headless_job(
             result["setup_summary"] = setup_message.get("content")
             write_result_json(result_file, result)
 
-        for iteration in range(1, max_iterations + 1):
+        for iteration in range(int(result['iterations_completed']) + 1, max_iterations + 1):
             print(f"[headless] starting iteration {iteration}/{max_iterations}")
+            print(f"[stage] 第 {iteration}/{max_iterations} 次参数迭代开始。", flush=True)
             messages.append(
                 {
                     "role": "user",
@@ -775,6 +782,10 @@ def run_headless_job(
             result["rounds"].append(round_record)
             result["iterations_completed"] = iteration
             result["final_evaluation"] = compact_evaluation
+            result['messages'] = messages
+            result['best_state'] = ctx.automation().get('_optimization_best_state', {})
+            print(f"[stage] 第 {iteration}/{max_iterations} 次参数迭代完成，"
+                  f"综合分 {compact_evaluation.get('overall_score', 'N/A')}。", flush=True)
 
             if stop_condition_met(latest_evaluation, stop_conditions):
                 result["status"] = "stopped_by_success"
@@ -852,6 +863,7 @@ def interactive_loop(llm: LLMClient, registry: ToolRegistry) -> None:
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Motor tuning agent")
+    parser.add_argument('--resume', action='store_true', help='Continue saved completed iterations')
     parser.add_argument(
         "--job-file",
         help="Path to tuning_job.json. When provided, run in headless automation mode.",
@@ -869,6 +881,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 llm=llm,
                 registry=registry,
                 ctx=ctx,
+                resume=args.resume,
             )
 
         interactive_loop(llm, registry)

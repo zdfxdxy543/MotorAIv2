@@ -13,10 +13,13 @@ for %%D in ("%SCRIPT_DIR%..\..\..") do set "REPO_ROOT=%%~fD"
 
 set "DEFAULT_MODEL_PATH=D:\WorkDocuments\Github\MotorAI\Output\test\project\simulate\MCS_STD_PMSM_MODEL.slx"
 set "MODEL_PATH=%DEFAULT_MODEL_PATH%"
+set "GMP_ROOT=%~2"
+set "EXPECTED_ID=%~3"
+set "GMP_ARGS="
+if not "%GMP_ROOT%"=="" set GMP_ARGS=--gmp-root "%GMP_ROOT%"
 
 if not "%~1"=="" (
     set "MODEL_PATH=%~1"
-    shift
 ) else (
     if not "%GMP_LOCAL_MODEL_PATH%"=="" (
         set "MODEL_PATH=%GMP_LOCAL_MODEL_PATH%"
@@ -29,5 +32,5 @@ if not exist "%MODEL_PATH%" (
     exit /b 20
 )
 
-python "%SCRIPT_DIR%run_local_job.py" --model-path "%MODEL_PATH%" --scope-map "%SCRIPT_DIR%..\log\simulation\scope_channel_map.json"
+python "%SCRIPT_DIR%run_local_job.py" --batch --model-path "%MODEL_PATH%" %GMP_ARGS% --expected-connection-id "%EXPECTED_ID%" --scope-map "%SCRIPT_DIR%..\log\simulation\scope_channel_map.json"
 exit /b %ERRORLEVEL%

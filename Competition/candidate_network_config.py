@@ -11,14 +11,14 @@ if str(MOTORAI_ROOT) not in sys.path:
     sys.path.insert(0, str(MOTORAI_ROOT))
 
 from Competition.competition_workspace import discover_candidate_dirs, load_json_object, write_json
+from Optimize.agent_silhelper.sil_session import network_options
 
 
 DEFAULT_NETWORK_CONFIG = {
     "target_address": "127.0.0.1",
     "receive_port": 12500,
     "transmit_port": 12501,
-    "command_recv_port": 12502,
-    "command_trans_port": 12503,
+    "transport": "udp",
 }
 
 
@@ -41,32 +41,21 @@ def default_network_config_for_candidate(candidate_dir: Path) -> dict[str, Any]:
     index = _candidate_index(candidate_dir)
     config["receive_port"] = 12500 + (index - 1) * 100
     config["transmit_port"] = 12501 + (index - 1) * 100
-    config["command_recv_port"] = 12502 + (index - 1) * 100
-    config["command_trans_port"] = 12503 + (index - 1) * 100
     return config
 
 
 def _normalize_network_config(
-    *,
-    candidate_dir: Path,
-    target_address: str | None = None,
-    receive_port: int | str | None = None,
-    transmit_port: int | str | None = None,
-    command_recv_port: int | str | None = None,
-    command_trans_port: int | str | None = None,
+    *, candidate_dir: Path, target_address: str | None = None,
+    receive_port: int | str | None = None, transmit_port: int | str | None = None,
+    transport: str = "udp",
 ) -> dict[str, Any]:
     config = default_network_config_for_candidate(candidate_dir)
-    if target_address:
-        config["target_address"] = str(target_address).strip()
-    for key, value in (
-        ("receive_port", receive_port),
-        ("transmit_port", transmit_port),
-        ("command_recv_port", command_recv_port),
-        ("command_trans_port", command_trans_port),
-    ):
+    config["transport"] = transport
+    for key, value in (("target_address", target_address),
+                       ("receive_port", receive_port), ("transmit_port", transmit_port)):
         if value is not None and str(value).strip():
-            config[key] = int(value)
-    return config
+            config[key] = value
+    return network_options(config)
 
 
 def _candidate_json_path(candidate_dir: Path) -> Path:
@@ -107,6 +96,8 @@ def _build_backend(
     network_config: dict[str, Any],
 ) -> dict[str, Any]:
     mode = (mode or "local").strip().lower()
+    if mode not in ("local", "remote"):
+        raise ValueError(f"Unsupported SIL backend: {mode}")
     if mode != "remote":
         return {"mode": "local"}
 
@@ -118,8 +109,7 @@ def _build_backend(
         "target_address": network_config["target_address"],
         "receive_port": int(network_config["receive_port"]),
         "transmit_port": int(network_config["transmit_port"]),
-        "command_recv_port": int(network_config["command_recv_port"]),
-        "command_trans_port": int(network_config["command_trans_port"]),
+        "transport": network_config["transport"],
     }
     return backend
 
@@ -152,8 +142,7 @@ def list_candidate_network_configs(project_json: Path) -> list[dict[str, Any]]:
                     target_address=network.get("target_address"),
                     receive_port=network.get("receive_port"),
                     transmit_port=network.get("transmit_port"),
-                    command_recv_port=network.get("command_recv_port"),
-                    command_trans_port=network.get("command_trans_port"),
+                    transport=str(network.get("transport") or "udp"),
                 ),
                 "network_json": str(network_path),
             }
@@ -171,8 +160,8 @@ def save_candidate_network_config(
     target_address: str = "127.0.0.1",
     receive_port: int = 12500,
     transmit_port: int = 12501,
-    command_recv_port: int = 12502,
-    command_trans_port: int = 12503,
+    transport: str = "udp",
+    scheduler_url: str = "",
 ) -> dict[str, Any]:
     project_json = project_json.expanduser().resolve()
     candidate_dirs = {path.name: path for path in discover_candidate_dirs(project_json, ["all"])}
@@ -190,20 +179,27 @@ def save_candidate_network_config(
         target_address=target_address,
         receive_port=receive_port,
         transmit_port=transmit_port,
-        command_recv_port=command_recv_port,
-        command_trans_port=command_trans_port,
+        transport=transport,
+    )
+    backend = _build_backend(
+        mode=mode, candidate_dir=candidate_dir, candidate_data=candidate_data,
+        worker_url=worker_url, remote_model_path=remote_model_path, network_config=network_config,
     )
     network_path = candidate_dir / "project" / "simulate" / "network.json"
-    write_json(network_path, network_config)
+    previous = _load_json_if_exists(network_path)
+    # Keep the model-owned identity only while all connection settings stay unchanged.
+    try:
+        unchanged = bool(previous) and network_options(previous) == network_config
+    except ValueError:
+        unchanged = False
+    if unchanged:
+        published = {**previous, **network_config}
+        published.pop("command_recv_port", None)
+        published.pop("command_trans_port", None)
+    else:
+        published = network_config
+    write_json(network_path, published)
 
-    backend = _build_backend(
-        mode=mode,
-        candidate_dir=candidate_dir,
-        candidate_data=candidate_data,
-        worker_url=worker_url,
-        remote_model_path=remote_model_path,
-        network_config=network_config,
-    )
     candidate_data["network_config"] = network_config
     candidate_data["simulation_backend"] = backend
     write_json(candidate_json, candidate_data)
@@ -276,8 +272,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--target-address", default="127.0.0.1")
     parser.add_argument("--receive-port", type=int, default=12500)
     parser.add_argument("--transmit-port", type=int, default=12501)
-    parser.add_argument("--command-recv-port", type=int, default=12502)
-    parser.add_argument("--command-trans-port", type=int, default=12503)
+    parser.add_argument("--transport", choices=["udp", "tcp"], default="udp")
     return parser.parse_args(argv)
 
 
@@ -292,8 +287,7 @@ def main(argv: list[str] | None = None) -> int:
         target_address=args.target_address,
         receive_port=args.receive_port,
         transmit_port=args.transmit_port,
-        command_recv_port=args.command_recv_port,
-        command_trans_port=args.command_trans_port,
+        transport=args.transport,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0

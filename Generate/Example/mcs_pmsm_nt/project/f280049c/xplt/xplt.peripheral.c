@@ -243,7 +243,6 @@ interrupt void INT_IRIS_CAN_1_ISR(void)
 
 void send_monitor_data(void)
 {
-    uint16_t rx_raw[4];
     can_data_t tran_content[2];
 
     // 0x201: Monitor Motor Current
@@ -306,7 +305,7 @@ void flush_dl_tx_buffer()
 void flush_dl_rx_buffer()
 {
     uint16_t fifoLevel;
-    data_gt rxBuf[ISR_LOCAL_BUF_SIZE];
+    byte_gt rxBuf[ISR_LOCAL_BUF_SIZE];
 
     // read all FIFO messages
     fifoLevel = SCI_getRxFIFOStatus(IRIS_UART_USB_BASE);

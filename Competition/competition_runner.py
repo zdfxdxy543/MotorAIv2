@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Iterable
@@ -20,6 +21,8 @@ if str(MOTORAI_ROOT) not in sys.path:
     sys.path.insert(0, str(MOTORAI_ROOT))
 
 from Competition.candidate_evidence import write_candidate_evidence  # noqa: E402
+from Competition.f280049c_project import copy_f280049c_project  # noqa: E402
+from Optimize.agent_optimize.agent_core.checkpoint import load_checkpoint
 from Competition.competition_workspace import (  # noqa: E402
     candidate_id,
     candidate_optimize_paths,
@@ -36,7 +39,7 @@ from Competition.competition_workspace import (  # noqa: E402
 def configure_stdio() -> None:
     for stream in (sys.stdout, sys.stderr):
         try:
-            stream.reconfigure(encoding="utf-8")
+            stream.reconfigure(encoding="utf-8", line_buffering=True)
         except (AttributeError, ValueError):
             pass
 
@@ -65,7 +68,15 @@ def ensure_candidates(project_json: Path, count: int, *, force_init: bool) -> li
             )
         init_candidates(project_json, count, force=False)
 
-    return [candidates_root / name for name in names]
+    candidate_dirs = [candidates_root / name for name in names]
+    # Older workspaces gain the hardware target without recreating tuned sources.
+    project = load_json_object(project_json)
+    template = project.get('template_project_path')
+    gmp = project.get('gmp_path')
+    for candidate_dir in candidate_dirs:
+        copy_f280049c_project(candidate_dir, template=Path(template) if template else None,
+                             gmp_root=Path(gmp) if gmp else None)
+    return candidate_dirs
 
 
 def configure_optimize(candidate_dirs: Iterable[Path]) -> list[dict[str, Any]]:
@@ -75,7 +86,7 @@ def configure_optimize(candidate_dirs: Iterable[Path]) -> list[dict[str, Any]]:
     ]
 
 
-def build_optimize_command(candidate_dir: Path) -> tuple[list[str], dict[str, str], dict[str, str]]:
+def build_optimize_command(candidate_dir: Path, *, resume: bool = False) -> tuple[list[str], dict[str, str], dict[str, str]]:
     candidate_json = (candidate_dir / "candidate.json").resolve()
     optimize_paths = candidate_optimize_paths(candidate_dir)
     agent_project = optimize_paths["agent_project"].resolve()
@@ -88,7 +99,11 @@ def build_optimize_command(candidate_dir: Path) -> tuple[list[str], dict[str, st
     env_overlay = {
         "AGENT_PROJECT_CONFIG": str(agent_project),
         "PYTHONUTF8": "1",
+        "PYTHONUNBUFFERED": "1",
+        "PYTHONIOENCODING": "utf-8",
     }
+    if resume:
+        command.append('--resume')
     outputs = {
         "agent_project": str(agent_project),
         "tuning_result": str((candidate_dir / "log" / "optimize" / "tuning_result.json").resolve()),
@@ -122,9 +137,23 @@ def _sync_target_velocity_for_candidate(candidate_dir: Path) -> None:
         pass
 
 
-def run_optimize_for_candidate(candidate_dir: Path, *, dry_run: bool) -> dict[str, Any]:
-    command, env_overlay, outputs = build_optimize_command(candidate_dir)
+def run_optimize_for_candidate(candidate_dir: Path, *, dry_run: bool, resume: bool = False) -> dict[str, Any]:
+    command, env_overlay, outputs = (build_optimize_command(candidate_dir, resume=True)
+                                     if resume else build_optimize_command(candidate_dir))
     candidate_id_value = candidate_dir.name
+    if resume and not dry_run:
+        job_file = candidate_dir / 'candidate.json'
+        saved = load_checkpoint(outputs['tuning_result'], job_file, load_json_object(job_file))
+        if saved.get('status') in ('completed', 'stopped_by_success'):
+            # A pause can arrive after the agent saves its result but before
+            # this parent writes the evidence used by round feedback.
+            try:
+                outputs['candidate_evidence'] = str(write_candidate_evidence(candidate_dir).resolve())
+            except Exception:
+                pass
+            print(f'[progress] {candidate_id_value}：此前已完成，保留原结果。', flush=True)
+            return {'candidate_id': candidate_id_value, 'status': 'completed',
+                    'returncode': 0, 'resumed_completed': True, 'outputs': outputs}
 
     if dry_run:
         return {
@@ -148,21 +177,38 @@ def run_optimize_for_candidate(candidate_dir: Path, *, dry_run: bool) -> dict[st
 
     env = os.environ.copy()
     env.update(env_overlay)
-    result = subprocess.run(
-        command,
-        cwd=str(OPTIMIZE_AGENT_CWD),
-        env=env,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    stdout_path.write_text(result.stdout or "", encoding="utf-8")
-    stderr_path.write_text(result.stderr or "", encoding="utf-8")
+    print(f"[progress] {candidate_id_value}：Optimize Agent 已启动。", flush=True)
+    # Write while the agent runs: a simulation can take several minutes.
+    # stderr goes directly to disk so a full stderr pipe cannot block stdout.
+    with stdout_path.open("w", encoding="utf-8") as stdout_file, \
+            stderr_path.open("w", encoding="utf-8") as stderr_file:
+        with subprocess.Popen(
+            command,
+            cwd=str(OPTIMIZE_AGENT_CWD),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=stderr_file,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        ) as process:
+            for line in process.stdout:
+                stdout_file.write(line)
+                stdout_file.flush()
+                if line.startswith("[stage] "):
+                    print(f"[progress] {candidate_id_value}：{line[8:].rstrip()}", flush=True)
+            returncode = process.wait()
+    print(f"[progress] {candidate_id_value}：调优结束，返回码 {returncode}。", flush=True)
+    if returncode != 0:
+        print(f"[ERROR] {candidate_id_value} 调优失败（返回码 {returncode}）。日志：{stderr_path}",
+              file=sys.stderr, flush=True)
+        error_tail = stderr_path.read_text(encoding="utf-8", errors="replace")[-3000:].strip()
+        if error_tail:
+            print(error_tail, file=sys.stderr, flush=True)
 
     # ── Step 2: 优化证据 ───────────────────────────────────────────────
     # optimize 子进程结束后，从产物中提取指标、参数变化、收敛情况。
-    if result.returncode == 0 and not dry_run:
+    if returncode == 0 and not dry_run:
         try:
             evidence_path = write_candidate_evidence(candidate_dir)
             outputs["candidate_evidence"] = str(evidence_path.resolve())
@@ -171,29 +217,29 @@ def run_optimize_for_candidate(candidate_dir: Path, *, dry_run: bool) -> dict[st
 
     return {
         "candidate_id": candidate_id_value,
-        "status": "completed" if result.returncode == 0 else "failed",
-        "returncode": result.returncode,
+        "status": "completed" if returncode == 0 else "failed",
+        "returncode": returncode,
         "stdout": str(stdout_path.resolve()),
         "stderr": str(stderr_path.resolve()),
         "outputs": outputs,
     }
 
 
-def run_optimize(candidate_dirs: Iterable[Path], *, parallel: int, dry_run: bool) -> list[dict[str, Any]]:
+def run_optimize(candidate_dirs: Iterable[Path], *, parallel: int, dry_run: bool, resume: bool = False) -> list[dict[str, Any]]:
     candidate_dir_list = list(candidate_dirs)
     if parallel < 1:
         raise ValueError("--optimize-parallel must be >= 1")
 
     if parallel == 1:
         return [
-            run_optimize_for_candidate(candidate_dir, dry_run=dry_run)
+            run_optimize_for_candidate(candidate_dir, dry_run=dry_run, resume=resume)
             for candidate_dir in candidate_dir_list
         ]
 
     results: list[dict[str, Any]] = []
     with ThreadPoolExecutor(max_workers=parallel) as executor:
         futures = {
-            executor.submit(run_optimize_for_candidate, candidate_dir, dry_run=dry_run): candidate_dir
+            executor.submit(run_optimize_for_candidate, candidate_dir, dry_run=dry_run, resume=resume): candidate_dir
             for candidate_dir in candidate_dir_list
         }
         for future in as_completed(futures):
@@ -364,9 +410,12 @@ def run_competition(
     force_init: bool,
     force_next_round: bool = False,
     round_number: int = 1,
+    single_round: bool = False,
+    resume: bool = False,
 ) -> dict[str, Any]:
     project_json = project_json.expanduser().resolve()
     project_data = load_json_object(project_json)
+    print(f"[progress] 第 {round_number} 轮开始，共 {candidates} 个候选方案。", flush=True)
     write_common_requirement_snapshot(project_json, project_data)
     stop_conditions = project_data.get("stop_conditions")
     if not isinstance(stop_conditions, dict):
@@ -376,13 +425,28 @@ def run_competition(
     import shutil
     project_root = project_json.parent
 
-    if round_number == 1:
+    phase_path = project_root / 'rounds' / f'round_{round_number:02d}' / 'run_state.json'
+    saved_state = {}
+    if resume and phase_path.exists():
+        try:
+            saved_state = load_json_object(phase_path)
+        except (OSError, ValueError):
+            pass
+    resume_optimization = resume and saved_state.get('phase') == 'optimization'
+    run_id = str(saved_state.get('run_id') or uuid.uuid4().hex)
+
+    def save_phase(phase):
+        temporary = phase_path.with_name(phase_path.name + '.tmp')
+        write_json(temporary, {'phase': phase, 'run_id': run_id})
+        os.replace(temporary, phase_path)
+
+    if round_number == 1 and not resume:
         # 第一轮开始时清空旧的 rounds 目录
         old_rounds = project_root / "rounds"
         if old_rounds.exists():
             shutil.rmtree(old_rounds)
 
-    if round_number > 1:
+    if round_number > 1 and not resume:
         prev_round = round_number - 1
 
         # 备份上一轮源码 + 优化产物
@@ -429,12 +493,28 @@ def run_competition(
         skip_generate = False
         force_init = False
 
+    if round_number > 1:
+        round_profiles = project_root / 'rounds' / f'round_{round_number:02d}' / 'candidate_profiles.json'
+        if not round_profiles.exists() and not dry_run:
+            print(f'[progress] 正在生成第 {round_number} 轮策略，等待模型响应。', flush=True)
+            from Competition.next_round_strategy import generate_next_round_strategy
+            generate_next_round_strategy(project_json, from_round=round_number - 1,
+                                         to_round=round_number, candidate_count=candidates)
+        if round_profiles.exists() and not resume_optimization:
+            common_profiles = project_root / 'common/candidate_profiles.json'
+            common_profiles.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(round_profiles, common_profiles)
+        skip_generate = resume_optimization
+
     candidate_dirs = ensure_candidates(project_json, candidates, force_init=force_init)
     optimize_config_results = configure_optimize(candidate_dirs)
 
     selectors = selected_candidate_names(candidates)
     generate_result: dict[str, Any] | None = None
     if not skip_generate:
+        if not dry_run:
+            save_phase('generation')
+        print(f"[progress] 第 {round_number} 轮：正在生成控制程序。", flush=True)
         generate_result = generate_candidates(
             project_json,
             selectors,
@@ -515,45 +595,21 @@ def run_competition(
 
     optimize_results: list[dict[str, Any]] = []
     if not skip_optimize and generate_all_ok:
-        optimize_results = run_optimize(candidate_dirs, parallel=optimize_parallel, dry_run=dry_run)
-
-    # ── Step 3: 轮次反馈 ───────────────────────────────────────────────
-    round_feedback_path: str | None = None
-    next_round_profiles_path: str | None = None
-    if not skip_optimize and not dry_run:
-        try:
-            from Competition.round_feedback import generate_round_feedback  # noqa: E402
-            fb_path = generate_round_feedback(project_json, round_number=round_number)
-            round_feedback_path = str(fb_path.resolve())
-
-            # ── Step 4: 下一轮策略生成 ─────────────────────────────
-            fb_data = load_json_object(fb_path)
-            max_rounds = int(project_data.get("max_rounds") or 0)
-            at_limit = max_rounds > 0 and round_number >= max_rounds
-            if not at_limit:
-                from Competition.next_round_strategy import generate_next_round_strategy  # noqa: E402
-                next_count = int(project_data.get("candidate_count", candidates))
-                next_result = generate_next_round_strategy(
-                    project_json,
-                    from_round=round_number,
-                    to_round=round_number + 1,
-                    candidate_count=next_count,
-                )
-                next_round_profiles_path = next_result.get("candidate_profiles")
-                # 自动继续下一轮
-                return run_competition(
-                    project_json,
-                    candidates=candidates,
-                    parallel=parallel,
-                    optimize_parallel=optimize_parallel,
-                    dry_run=dry_run,
-                    skip_generate=False,
-                    skip_optimize=False,
-                    force_init=False,
-                    round_number=round_number + 1,
-                )
-        except Exception:
-            pass
+        if not dry_run:
+            # Candidate paths and requirements can be identical across rounds.
+            # A result belongs to this run only after its job receives this ID.
+            for candidate_dir in candidate_dirs:
+                candidate_json = candidate_dir / 'candidate.json'
+                if candidate_json.exists():
+                    candidate_data = load_json_object(candidate_json)
+                    candidate_data['_optimization_run_id'] = run_id
+                    temporary = candidate_json.with_name(candidate_json.name + '.tmp')
+                    write_json(temporary, candidate_data)
+                    os.replace(temporary, candidate_json)
+            save_phase('optimization')
+        optimize_results = (run_optimize(candidate_dirs, parallel=optimize_parallel, dry_run=dry_run, resume=True)
+                            if resume_optimization else
+                            run_optimize(candidate_dirs, parallel=optimize_parallel, dry_run=dry_run))
 
     scoreboard = [read_score(candidate_dir) for candidate_dir in candidate_dirs]
     winner = None if dry_run else choose_winner(scoreboard)
@@ -567,10 +623,45 @@ def run_competition(
         else build_winner_summary(winner, stop_conditions)
     )
 
+    # ── Step 3: 轮次反馈 ───────────────────────────────────────────────
+    round_feedback_path: str | None = None
+    next_round_profiles_path: str | None = None
+    optimize_all_ok = bool(optimize_results) and all(
+        item.get("status") == "completed" for item in optimize_results
+    )
+    if not skip_optimize and not dry_run and optimize_all_ok:
+        try:
+            print(f"[progress] 第 {round_number} 轮：正在汇总仿真评分。", flush=True)
+            from Competition.round_feedback import generate_round_feedback  # noqa: E402
+            fb_path = generate_round_feedback(project_json, round_number=round_number)
+            round_feedback_path = str(fb_path.resolve())
+
+            # ── Step 4: 下一轮策略生成 ─────────────────────────────
+            fb_data = load_json_object(fb_path)
+            # Use the same stop-condition check for feedback, CLI and UI.
+            fb_data["requirement_satisfied"] = winner_summary["requirement_satisfied"]
+            write_json(fb_path, fb_data)
+            max_rounds = int(project_data.get("max_rounds") or 0)
+            at_limit = max_rounds > 0 and round_number >= max_rounds
+            if not at_limit and (force_next_round or not winner_summary["requirement_satisfied"]):
+                print(f"[progress] 正在生成第 {round_number + 1} 轮方案策略，等待模型响应。", flush=True)
+                from Competition.next_round_strategy import generate_next_round_strategy  # noqa: E402
+                next_count = int(project_data.get("candidate_count", candidates))
+                next_result = generate_next_round_strategy(
+                    project_json,
+                    from_round=round_number,
+                    to_round=round_number + 1,
+                    candidate_count=next_count,
+                )
+                next_round_profiles_path = next_result.get("candidate_profiles")
+        except Exception as exc:
+            raise RuntimeError(f"第 {round_number} 轮反馈或下一轮策略生成失败：{exc}") from exc
+
     result = {
         "schema_version": 1,
         "project_json": str(project_json),
         "candidate_count": candidates,
+        "round_number": round_number,
         "parallel": parallel,
         "generate_parallel": parallel,
         "optimize_parallel": optimize_parallel,
@@ -591,6 +682,20 @@ def run_competition(
 
     output_name = "competition_dry_run_result.json" if dry_run else "competition_run_result.json"
     write_json(project_json.parent / output_name, result)
+    # Save this round before CLI continuation. The UI owns its round transitions.
+    if not single_round and next_round_profiles_path:
+        return run_competition(
+            project_json,
+            candidates=candidates,
+            parallel=parallel,
+            optimize_parallel=optimize_parallel,
+            dry_run=dry_run,
+            skip_generate=False,
+            skip_optimize=False,
+            force_init=False,
+            force_next_round=force_next_round,
+            round_number=round_number + 1,
+        )
     return result
 
 
@@ -616,6 +721,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--skip-optimize", action="store_true")
     parser.add_argument("--force-init", action="store_true")
     parser.add_argument("--round", type=int, default=1, help="轮次编号，默认 1")
+    parser.add_argument("--single-round", action="store_true", help="只执行指定轮次，轮次切换交由 UI 管理")
+    parser.add_argument('--resume', action='store_true', help='Resume the paused round')
     parser.add_argument("--force-next-round", action="store_true", help="即使停止条件已满足，也强制生成下一轮策略")
     args = parser.parse_args(argv)
 
@@ -631,6 +738,8 @@ def main(argv: list[str] | None = None) -> int:
             force_init=args.force_init,
             force_next_round=args.force_next_round,
             round_number=args.round,
+            single_round=args.single_round,
+            resume=args.resume,
         )
 
         # ── 生成跨轮次迭代摘要，供 UI 可视化使用 ──────────────────────
@@ -647,7 +756,10 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     print(json.dumps(result, ensure_ascii=False, indent=2))
-    return 0
+    failed = any(item.get("status") == "failed" for item in result.get("optimize", []))
+    if result.get("generate"):
+        failed = failed or any(item.get("status") == "failed" for item in result["generate"].get("results", []))
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

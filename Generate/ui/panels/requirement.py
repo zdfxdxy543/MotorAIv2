@@ -9,7 +9,7 @@ from PyQt5.QtWidgets import (
     QWidget,
     QVBoxLayout,
 )
-from PyQt5.QtCore import Qt, QDateTime
+from PyQt5.QtCore import Qt, QDateTime, QThread, pyqtSignal
 import json
 import math
 from pathlib import Path
@@ -21,13 +21,42 @@ from styles.theme import (
     primary_button_qss,
     status_label_qss,
 )
-from widgets.chat import ChatInputEdit, ChatStreamWidget, ChatWorker, call_ui_chat_model
+from widgets.chat import ChatInputEdit, ChatStreamWidget, ChatWorker, CancellableWorker, call_ui_chat_model
 from Competition.competition_workspace import write_common_requirement_snapshot
 
 
+class MetricBuildWorker(CancellableWorker):
+    success = pyqtSignal()
+    failure = pyqtSignal(str)
+
+    def __init__(self, panel):
+        super().__init__(panel)
+        self.panel = panel
+
+    def run(self):
+        try:
+            phases = [('任务类型', self.panel._generate_task_type),
+                      ('信号、目标和事件', self.panel._generate_signals_targets_events),
+                      ('评价指标', self.panel._generate_metrics),
+                      ('目标参数', self.panel._generate_targets_from_metrics),
+                      ('停止条件', self.panel._generate_stop_conditions)]
+            for name, operation in phases:
+                self.check_cancelled()
+                self.panel._set_progress(f'正在生成{name}...')
+                operation()
+            self.check_cancelled()
+            self.success.emit()
+        except Exception as exc:
+            if not self.cancelled:
+                self.failure.emit(str(exc))
+
+
 class RequirementPanel(QWidget):
+    ui_call = pyqtSignal(object, object)
+
     def __init__(self, project_json_getter=None, parent=None):
         super().__init__(parent)
+        self.ui_call.connect(self._apply_ui_call)
         self.chat_worker = None
         self.project_json_getter = project_json_getter
         self.chat_history = []
@@ -70,6 +99,7 @@ class RequirementPanel(QWidget):
         
         self.param_table = QTableWidget()
         self.param_table.setColumnCount(3)
+        self.param_table.itemChanged.connect(self._on_target_value_changed)
         self.param_table.setHorizontalHeaderLabels(['信号名称', '目标值', '单位'])
         self.param_table.horizontalHeader().setStretchLastSection(True)
         self.param_table.verticalHeader().setVisible(False)
@@ -111,6 +141,9 @@ class RequirementPanel(QWidget):
         self.external_finished_callback = finished_callback
 
     def _append_chat(self, role: str, text: str, echo_external: bool = True):
+        if QThread.currentThread() != self.thread():
+            self.ui_call.emit(QThread.currentThread(), lambda: self._append_chat(role, text, echo_external))
+            return
         role = self._normalize_chat_role(role)
         self.chat_view.append_message(role, text)
         if role != 'debug':
@@ -152,6 +185,9 @@ class RequirementPanel(QWidget):
         self._set_status_text(f'状态：{text}')
 
     def _set_status_text(self, text: str):
+        if QThread.currentThread() != self.thread():
+            self.ui_call.emit(QThread.currentThread(), lambda: self._set_status_text(text))
+            return
         self.status_label.setText(text)
         if callable(self.external_status_callback):
             self.external_status_callback(text)
@@ -451,19 +487,25 @@ class RequirementPanel(QWidget):
     }
 
     def on_chat_success(self, reply: str):
+        if getattr(self.sender(), 'cancelled', False):
+            return
         self.chat_view.hide_thinking()
         self._append_chat('assistant', reply)
         self._write_requirement_to_project_json(reply)
-        self._set_progress('正在生成任务类型...')
-        self._generate_task_type()
-        self._set_progress('正在生成信号、目标和事件...')
-        self._generate_signals_targets_events()
-        self._set_progress('正在生成评价指标...')
-        self._generate_metrics()
-        self._set_progress('正在生成目标参数...')
-        self._generate_targets_from_metrics()
-        self._set_progress('正在生成停止条件...')
-        self._generate_stop_conditions()
+        self.param_table.setEnabled(False)
+        self.chat_worker = MetricBuildWorker(self)
+        self.chat_worker.success.connect(self._on_metrics_built)
+        self.chat_worker.failure.connect(self.on_chat_failure)
+        self.chat_worker.finished.connect(self.on_chat_finished)
+        self.chat_worker.start()
+
+    def _apply_ui_call(self, worker, callback):
+        if worker is self.chat_worker and not worker.cancelled:
+            callback()
+
+    def _on_metrics_built(self):
+        if getattr(self.sender(), 'cancelled', False):
+            return
         self._set_status_text('状态：需求指标已完善')
         if callable(self.completion_callback):
             self.completion_callback()
@@ -1004,6 +1046,10 @@ class RequirementPanel(QWidget):
             self._append_error('目标参数生成失败。', str(exc))
 
     def _update_param_table(self, targets):
+        if QThread.currentThread() != self.thread():
+            self.ui_call.emit(QThread.currentThread(), lambda: self._update_param_table(targets))
+            return
+        signals_blocked = self.param_table.blockSignals(True)
         self.param_table.setRowCount(len(targets))
         row = 0
         for signal, target_info in targets.items():
@@ -1021,7 +1067,7 @@ class RequirementPanel(QWidget):
             self.param_table.setItem(row, 2, unit_item)
             row += 1
         
-        self.param_table.itemChanged.connect(self._on_target_value_changed)
+        self.param_table.blockSignals(signals_blocked)
 
     def _on_target_value_changed(self, item):
         if item.column() != 1:
@@ -1120,12 +1166,17 @@ class RequirementPanel(QWidget):
             self._append_error('停止条件生成失败。', str(exc))
 
     def on_chat_failure(self, error_text: str):
+        if getattr(self.sender(), 'cancelled', False):
+            return
         self.chat_view.hide_thinking()
         self._append_error('对话失败，请检查设置与网络。', error_text)
         self._set_status_text('状态：对话失败，请检查设置与网络')
 
     def on_chat_finished(self):
+        if self.sender() is not None and self.sender() is not self.chat_worker:
+            return
         self.chat_view.hide_thinking()
+        self.param_table.setEnabled(True)
         self.send_btn.setEnabled(True)
         if callable(self.external_finished_callback):
             self.external_finished_callback()

@@ -40,7 +40,7 @@
 #include <ctl/component/hardware_preset/pmsm_motor/SM060R20B30MNAD.h>
 
 // invoke motor controller parameters
-#include <MONKEY_BOARD.h>
+#include "Driver_Board.h"
 
 ///////////////////////////////////////////////////////////
 // Encoder Properties

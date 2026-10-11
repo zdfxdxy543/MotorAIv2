@@ -3,7 +3,7 @@
 #include <ctrl_settings.h>
 #include "ctl_main.h"
 #include <xplt.peripheral.h>
-#include <core/pm/function_scheduler.h>
+#include <core/pm/function_scheduler/function_scheduler.h>
 
 //=================================================================================================
 // global controller variables
@@ -32,9 +32,9 @@ mc_foc_init_t mtr_ctrl_init;
 // ctl_smc_mech_ctrl_t smc_ctrl;
 // ctl_smc_mech_init_t smc_init;
 // int32_t smc_target_revs = 0;
-// ctrl_gt smc_target_angle_pu = float2ctrl(0.0f);
-// ctrl_gt smc_vel_ref_pu = float2ctrl(0.1f);
-// ctrl_gt smc_acc_ref_pu = float2ctrl(0.0f);
+// ctrl_gt smc_target_angle_pu = real2ctrl(0.0f);
+// ctrl_gt smc_vel_ref_pu = real2ctrl(0.1f);
+// ctrl_gt smc_acc_ref_pu = real2ctrl(0.0f);
 // End SMC Mech Var
 
 // Start LADRC Speed Var
@@ -103,11 +103,11 @@ void ctl_init()
     // init SPWM modulator
     //
 #if defined USING_NPC_MODULATOR
-    ctl_init_npc_modulator(&spwm, CTRL_PWM_CMP_MAX, CTRL_PWM_DEADBAND_CMP, &mtr_ctrl.iuvw, float2ctrl(0.02),
-                           float2ctrl(0.005));
+    ctl_init_npc_modulator(&spwm, CTRL_PWM_CMP_MAX, CTRL_PWM_DEADBAND_CMP, &mtr_ctrl.iuvw, real2ctrl(0.02),
+                           real2ctrl(0.005));
 #else
-    ctl_init_spwm_modulator(&spwm, CTRL_PWM_CMP_MAX, CTRL_PWM_DEADBAND_CMP, &mtr_ctrl.iuvw, float2ctrl(0.02),
-                            float2ctrl(0.005));
+    ctl_init_spwm_modulator(&spwm, CTRL_PWM_CMP_MAX, CTRL_PWM_DEADBAND_CMP, &mtr_ctrl.iuvw, real2ctrl(0.02),
+                            real2ctrl(0.005));
 #endif // USING_NPC_MODULATOR
 
     //
@@ -127,7 +127,7 @@ void ctl_init()
     // Encoder Init
     //
     ctl_init_autoturn_pos_encoder(&pos_enc, mtr_ctrl_init.pole_pairs, CTRL_POS_ENC_FS);
-    ctl_set_autoturn_pos_encoder_mech_offset(&pos_enc, float2ctrl(CTRL_POS_ENC_BIAS));
+    ctl_set_autoturn_pos_encoder_mech_offset(&pos_enc, real2ctrl(CTRL_POS_ENC_BIAS));
 
     ctl_init_spd_calculator(&spd_enc, &pos_enc.encif, CONTROLLER_FREQUENCY, CTRL_MECH_DIV, MOTOR_PARAM_MAX_SPEED, 20.0f);
 
@@ -353,21 +353,21 @@ fast_gt ctl_exec_adc_calibration(void)
 
 void gmp_pil_sim_step(const gmp_sim_rx_buf_t* rx, gmp_sim_tx_buf_t* tx)
 {
-#if defined ENBALE_GMP_DL_PIL_SIM
+#if defined ENABLE_GMP_DL_PIL_SIM
     ctl_input_callback_pil(rx);
 
     ctl_dispatch();
 
     ctl_output_callback_pil(tx);
-#endif // defined ENBALE_GMP_DL_PIL_SIM
+#endif // defined ENABLE_GMP_DL_PIL_SIM
 }
 
-#if defined ENBALE_GMP_DL_PIL_SIM
+#if defined ENABLE_GMP_DL_PIL_SIM
 time_gt gmp_base_get_ctrl_tick(void)
 {
     return mtr_ctrl.isr_tick/((uint32_t)CONTROLLER_FREQUENCY/1000);
 }
-#endif // defined ENBALE_GMP_DL_PIL_SIM
+#endif // defined ENABLE_GMP_DL_PIL_SIM
 
 void Setup_Motor_Current()
 {

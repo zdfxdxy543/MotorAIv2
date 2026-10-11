@@ -160,7 +160,7 @@ def _sync_target_velocity_for_ui_project(project_json_path: str) -> None:
             pass
 
 
-def run_agent_optimization(project_json_path):
+def run_agent_optimization(project_json_path, resume=False):
     optimize_config = normalize_optimize_config(load_settings())
     
     if not os.path.exists(project_json_path):
@@ -211,9 +211,15 @@ def run_agent_optimization(project_json_path):
     print(f"\n开始执行调优脚本...")
 
     try:
-        cmd_command = f'start cmd /k "{run_tuning_bat} \"{project_json_path}\""'
-        subprocess.run(cmd_command, shell=True, check=True, cwd=os.path.dirname(run_tuning_bat))
-        print(f"run_tuning_agent.bat 已在新窗口启动")
+        command_shell = os.environ.get('COMSPEC', 'cmd.exe')
+        resume_arg = ' --resume' if resume else ''
+        cmd_command = f'"{command_shell}" /d /s /c ""{run_tuning_bat}" "{project_json_path}"{resume_arg}"'
+        env = os.environ.copy()
+        env['MOTORAI_AGENT_PYTHON'] = sys.executable
+        # Keep the launcher alive and every descendant owned by the UI.
+        subprocess.run(cmd_command, check=True, cwd=os.path.dirname(run_tuning_bat),
+                       env=env, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        print('run_tuning_agent.bat 已完成')
     except subprocess.CalledProcessError as e:
         print(f"启动 run_tuning_agent.bat 失败: {e}")
         return 1
@@ -227,5 +233,5 @@ if __name__ == '__main__':
         sys.exit(1)
     
     project_json_path = sys.argv[1]
-    exit_code = run_agent_optimization(project_json_path)
+    exit_code = run_agent_optimization(project_json_path, resume='--resume' in sys.argv[2:])
     sys.exit(exit_code)

@@ -6,10 +6,11 @@ if "%~1"=="" (
     exit /b 2
 )
 
-if not "%~2"=="" (
-    echo Error: Only one argument is allowed: path\to\tuning_job.json
+if not "%~2"=="" if not "%~2"=="--resume" (
+    echo Error: optional second argument must be --resume
     exit /b 2
 )
+if not "%~3"=="" exit /b 2
 
 set "JOB_FILE=%~1"
 
@@ -20,5 +21,6 @@ if not exist "%JOB_FILE%" (
 
 cd /d "%~dp0"
 set "PYTHONUTF8=1"
-python agent_modified.py --job-file "%JOB_FILE%"
+if not defined MOTORAI_AGENT_PYTHON set "MOTORAI_AGENT_PYTHON=python"
+"%MOTORAI_AGENT_PYTHON%" agent_modified.py --job-file "%JOB_FILE%" %~2
 exit /b %ERRORLEVEL%

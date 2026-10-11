@@ -28,6 +28,14 @@ if not "%~1"=="" (
 call :FIND_REPO_ROOT "%SEARCH_START%"
 if errorlevel 1 goto ERR_REPO_ROOT
 
+set "GMP_PRO_LOCATION=%REPO_ROOT%"
+
+rem Activate the configured GMP environment in this calling script.
+if exist "%GMP_PRO_LOCATION%\tools\gmp_installer\ensure_gmp_environment.bat" (
+    call "%GMP_PRO_LOCATION%\tools\gmp_installer\ensure_gmp_environment.bat"
+    if errorlevel 1 exit /b 20
+)
+
 set "SLN_DIR=%REPO_ROOT%\ctl\suite\mcs_pmsm_nt\project\simulate"
 set "LOG_DIR=%REPO_ROOT%\tools\agent\log\build"
 set "RUN_LOG=%LOG_DIR%\run_exe.log"
@@ -77,8 +85,8 @@ exit /b %RUN_RESULT%
 set "CURRENT=%~f1"
 
 :FIND_REPO_ROOT_LOOP
-if exist "%CURRENT%\tools\facilities_generator\gmp_fac_generate_srcs_example.bat" (
-    if exist "%CURRENT%\ctl\suite\mcs_pmsm_nt\project\simulate\GMP_Motor_Control_simulink.sln" (
+if exist "%CURRENT%\tools\facilities_generator\src_mgr\framework_sync_src_v3.py" (
+    if exist "%CURRENT%\gmp_core.h" (
         set "REPO_ROOT=%CURRENT%"
         exit /b 0
     )
@@ -99,8 +107,8 @@ echo [ERROR] Repo root not found.
 echo Search started from:
 echo "%SEARCH_START%"
 echo Expected to find both:
-echo tools\facilities_generator\gmp_fac_generate_srcs_example.bat
-echo ctl\suite\mcs_pmsm_nt\project\simulate\GMP_Motor_Control_simulink.sln
+echo tools\facilities_generator\src_mgr\framework_sync_src_v3.py
+echo gmp_core.h
 exit /b 10
 
 

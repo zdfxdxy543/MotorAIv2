@@ -262,12 +262,12 @@ def build_c_sections(loop_items: List[dict], mech_mode: str) -> tuple[List[str],
         elif mech_mode == "ladrc_spd":
             add_unique(init_lines, "    Setup_LADRC_Speed_Controller();\n")
             add_unique(bind_lines, "    ctl_attach_ladrc_spd_ctrl(&ladrc_spd_ctrl, &spd_enc.encif);\n")
-            add_unique(enable_lines, "    ctl_set_ladrc_spd_mode(&ladrc_spd_ctrl, LADRC_SPD_MODE_ENABLE, float2ctrl(0.0f));\n")
+            add_unique(enable_lines, "    ctl_set_ladrc_spd_mode(&ladrc_spd_ctrl, LADRC_SPD_MODE_ENABLE, real2ctrl(0.0f));\n")
             add_unique(enable_lines, "    ctl_set_ladrc_target_velocity(&ladrc_spd_ctrl, 0.1);\n")
         elif mech_mode == "ladrc_pos":
             add_unique(init_lines, "    Setup_LADRC_Position_Controller();\n")
             add_unique(bind_lines, "    ctl_attach_ladrc_pos_ctrl(&ladrc_pos_ctrl, &pos_enc.encif);\n")
-            add_unique(enable_lines, "    ctl_enable_ladrc_pos_ctrl(&ladrc_pos_ctrl, float2ctrl(0.0f));\n")
+            add_unique(enable_lines, "    ctl_enable_ladrc_pos_ctrl(&ladrc_pos_ctrl, real2ctrl(0.0f));\n")
         else:
             add_unique(init_lines, "    Setup_Mechanical_Controller();\n")
             add_unique(bind_lines, "    ctl_attach_mech_ctrl(&mech_ctrl, &pos_enc.encif, &spd_enc.encif);\n")
@@ -320,7 +320,7 @@ def generate_header(template_text: str, loop_items: List[dict], mech_mode: str) 
             lines.append(f"{indent}ctl_set_foc_core_idq_ref(&mtr_ctrl, 0, ctl_get_ladrc_spd_cmd(&ladrc_spd_ctrl));\n")
             lines.append("\n")
         elif mech_mode == "ladrc_pos":
-            lines.append(f"{indent}ctl_step_ladrc_pos_ctrl(&ladrc_pos_ctrl, 0, float2ctrl(0.0f), float2ctrl(0.0f), float2ctrl(0.0f));\n")
+            lines.append(f"{indent}ctl_step_ladrc_pos_ctrl(&ladrc_pos_ctrl, 0, real2ctrl(0.0f), real2ctrl(0.0f), real2ctrl(0.0f));\n")
             lines.append("\n")
             lines.append(f"{indent}ctl_set_foc_core_idq_ref(&mtr_ctrl, 0, ctl_get_ladrc_pos_cmd(&ladrc_pos_ctrl));\n")
             lines.append("\n")

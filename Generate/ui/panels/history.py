@@ -7,6 +7,7 @@ JSON no longer exists on disk are removed automatically.
 from __future__ import annotations
 
 import json
+import stat
 import time
 from pathlib import Path
 from typing import Callable
@@ -17,12 +18,14 @@ from PyQt5.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QMenu,
+    QMessageBox,
     QScrollArea,
     QSplitter,
     QVBoxLayout,
     QWidget,
 )
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import QFile, Qt
 
 import core.paths  # ensures repository roots are on sys.path
 from core.paths import MOTORAI_ROOT
@@ -70,10 +73,35 @@ def load_history() -> list[dict]:
 
 def _save_entries(entries: list[dict]) -> None:
     HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    HISTORY_FILE.write_text(
+    temporary = HISTORY_FILE.with_name(HISTORY_FILE.name + '.tmp')
+    temporary.write_text(
         json.dumps({"entries": entries}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    temporary.replace(HISTORY_FILE)
+
+
+def remove_from_history(json_path: Path | str) -> None:
+    path = Path(json_path).expanduser().resolve()
+    _save_entries([entry for entry in load_history()
+                   if Path(entry['path']).expanduser().resolve() != path])
+
+
+def project_folder_for_deletion(json_path: Path | str) -> Path:
+    """Only recycle a standalone MotorAI workspace, never an arbitrary JSON's parent."""
+    source = Path(json_path).expanduser().absolute()
+    if (source.is_symlink() or source.parent.is_symlink()
+            or getattr(source.parent.lstat(), 'st_file_attributes', 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT):
+        raise ValueError('工程路径是链接，请使用“从历史移除”。')
+    path = source.resolve(strict=True)
+    folder = path.parent
+    data = json.loads(path.read_text(encoding='utf-8-sig'))
+    if (folder == Path(folder.anchor) or folder == MOTORAI_ROOT or folder in MOTORAI_ROOT.parents
+            or (folder / '.git').exists() or path.stem != folder.name
+            or not isinstance(data, dict) or data.get('workspace_mode') != 'competition'
+            or not (folder / 'candidates').is_dir() or not (folder / 'common').is_dir()):
+        raise ValueError('该目录不是可删除的独立 MotorAI 工程，请使用“从历史移除”。')
+    return folder
 
 
 def add_to_history(json_path: Path | str) -> None:
@@ -116,10 +144,14 @@ class HistoryPanel(QWidget):
         on_project_selected: Callable[[Path], None] | None = None,
         on_project_opened: Callable[[Path], None] | None = None,
         parent=None,
+        can_delete_project: Callable[[Path], bool] | None = None,
+        on_project_deleted: Callable[[Path], None] | None = None,
     ):
         super().__init__(parent)
         self._on_project_selected = on_project_selected
         self._on_project_opened = on_project_opened
+        self._can_delete_project = can_delete_project
+        self._on_project_deleted = on_project_deleted
 
         t = current_theme()
         self.setObjectName('historyPanel')
@@ -131,6 +163,9 @@ class HistoryPanel(QWidget):
         self.project_list.setFrameShape(QFrame.NoFrame)
         self.project_list.itemClicked.connect(self._on_item_clicked)
         self.project_list.itemDoubleClicked.connect(self._on_item_double_clicked)
+        self.project_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.project_list.customContextMenuRequested.connect(self._show_context_menu)
+        self.project_list.setToolTip('单击查看详情，双击打开工程，右键显示操作菜单')
         self.project_list.setStyleSheet(
             f"QListWidget{{background:{t.panel};border:none;outline:none;}}"
             f"QListWidget::item{{padding:6px 8px;border:none;border-radius:6px;}}"
@@ -262,7 +297,12 @@ class HistoryPanel(QWidget):
 
     def refresh(self) -> None:
         """Reload history from the JSON file (stale entries auto-removed)."""
+        current = self.project_list.currentItem()
+        selected_path = current.data(Qt.UserRole) if current else None
         self.project_list.clear()
+        self.info_card.hide()
+        self.info_empty_label.setText('单击历史工程查看详情')
+        self.info_empty_label.show()
 
         for entry in load_history():
             name = entry.get("name") or "unknown"
@@ -270,8 +310,66 @@ class HistoryPanel(QWidget):
             item = QListWidgetItem(name)
             item.setData(Qt.UserRole, path_str)
             self.project_list.addItem(item)
+            if path_str == selected_path:
+                self.project_list.setCurrentItem(item)
+                self._show_info(Path(path_str))
 
     # ── slots ────────────────────────────────────────────────────────
+
+    def _show_context_menu(self, position) -> None:
+        item = self.project_list.itemAt(position)
+        if item is None or not item.data(Qt.UserRole):
+            return
+        self.project_list.setCurrentItem(item)
+        path = Path(item.data(Qt.UserRole))
+        menu = QMenu(self)
+        details = menu.addAction('查看详情')
+        opened = menu.addAction('打开工程')
+        menu.addSeparator()
+        remove = menu.addAction('从历史移除')
+        delete = menu.addAction('删除工程…')
+        delete.setEnabled(self._can_delete_project is None or self._can_delete_project(path))
+        action = menu.exec_(self.project_list.viewport().mapToGlobal(position))
+        menu.deleteLater()
+        if action == details:
+            self._on_item_clicked(item)
+        elif action == opened:
+            self._on_item_double_clicked(item)
+        elif action == remove:
+            try:
+                remove_from_history(path)
+                self.refresh()
+            except OSError as exc:
+                QMessageBox.critical(self, '移除失败', str(exc))
+        elif action == delete:
+            self._delete_project(path)
+
+    def _delete_project(self, path: Path) -> None:
+        try:
+            if self._can_delete_project is not None and not self._can_delete_project(path):
+                QMessageBox.warning(self, '工程正在运行', '请先停止当前任务，再删除工程。')
+                return
+            folder = project_folder_for_deletion(path)
+            answer = QMessageBox.question(self, '删除工程',
+                f'将工程“{folder.name}”及其中的代码、仿真结果和日志移到回收站？\n\n'
+                f'{folder}\n\n需要恢复时可从系统回收站还原。',
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if answer != QMessageBox.Yes:
+                return
+            if self._can_delete_project is not None and not self._can_delete_project(path):
+                QMessageBox.warning(self, '工程正在运行', '请先停止当前任务，再删除工程。')
+                return
+            # Validate the absolute target again after the confirmation dialog.
+            folder = project_folder_for_deletion(path)
+            recycled, _ = QFile.moveToTrash(str(folder))
+            if not recycled:
+                raise OSError('无法移到回收站，工程已保留。请检查目录是否被占用或回收站是否可用。')
+            if self._on_project_deleted:
+                self._on_project_deleted(path)
+            remove_from_history(path)
+            self.refresh()
+        except (OSError, ValueError) as exc:
+            QMessageBox.critical(self, '删除失败', str(exc))
 
     def _on_item_clicked(self, item: QListWidgetItem) -> None:
         path_str = item.data(Qt.UserRole)
@@ -293,6 +391,8 @@ class HistoryPanel(QWidget):
     def _show_info(self, json_path: Path) -> None:
         try:
             data = json.loads(json_path.read_text(encoding="utf-8-sig"))
+            if not isinstance(data, dict):
+                raise ValueError('项目 JSON 顶层必须是对象')
         except Exception:
             self.info_card.hide()
             self.info_empty_label.setText('无法读取项目文件')

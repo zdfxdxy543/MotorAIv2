@@ -468,6 +468,14 @@
         {
             "root": "ctl",
             "module": "math_block|vector_lite"
+        },
+        {
+            "root": "core",
+            "module": "base|port"
+        },
+        {
+            "root": "core",
+            "module": "rt"
         }
     ]
 }

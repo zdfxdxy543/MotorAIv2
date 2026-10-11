@@ -9,7 +9,7 @@ from PyQt5.QtWidgets import (
     QWidget,
     QVBoxLayout,
 )
-from PyQt5.QtCore import Qt, QDateTime, QSize, QThread, pyqtSignal
+from PyQt5.QtCore import Qt, QDateTime, QSize, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QMovie
 import json
 from pathlib import Path
@@ -24,7 +24,7 @@ from styles.theme import (
     secondary_button_qss,
     surface_card_qss,
 )
-from widgets.chat import ChatInputEdit, ChatStreamWidget, ChatWorker, call_ui_chat_model
+from widgets.chat import ChatInputEdit, ChatStreamWidget, ChatWorker, CancellableWorker, call_ui_chat_model
 from workflow.agent_flow import (
     ACTION_ANSWER_QUESTION,
     ACTION_CLARIFY,
@@ -83,7 +83,7 @@ def _build_tuning_policy_from_loops(selected_loops):
     }
 
 
-class GenerateProgramWorker(QThread):
+class GenerateProgramWorker(CancellableWorker):
     progress = pyqtSignal(str)
     debug = pyqtSignal(str)
     success = pyqtSignal(dict)
@@ -107,9 +107,12 @@ class GenerateProgramWorker(QThread):
 
     def run(self):
         try:
-            self.success.emit(self._generate())
+            result = self._generate()
+            if not self.cancelled:
+                self.success.emit(result)
         except Exception as exc:
-            self.failure.emit(str(exc))
+            if not self.cancelled:
+                self.failure.emit(str(exc))
 
     def _generate(self) -> dict:
         self.progress.emit(f'正在为 {len(self.candidate_dirs)} 个 candidate 生成控制器程序...')
@@ -119,6 +122,7 @@ class GenerateProgramWorker(QThread):
         first_candidate_data = None
 
         for index, candidate_dir in enumerate(self.candidate_dirs, start=1):
+            self.check_cancelled()
             profile = self._load_candidate_profile(candidate_dir, index)
             loop_ids_output = candidate_dir / 'log' / 'generate' / 'controller_loop_ids_generated.json'
             c_output = candidate_dir / 'src' / 'ctl_main.c'
@@ -151,6 +155,7 @@ class GenerateProgramWorker(QThread):
                 temperature_override=profile_temperature,
             )
 
+            self.check_cancelled()
             self.progress.emit(f'[{index}/{len(self.candidate_dirs)}] 正在生成 {candidate_dir.name} 的控制程序文件...')
             self.debug.emit(f'[{index}/{len(self.candidate_dirs)}] {candidate_dir.name} 生成 ctl_main 与 paras')
             merge_code = merger.main(
@@ -198,6 +203,7 @@ class GenerateProgramWorker(QThread):
             })
 
         if first_loop_ids_path is not None:
+            self.check_cancelled()
             self._update_project_json_selected_loops(first_loop_ids_path)
 
         with open(self.project_json, 'r', encoding='utf-8') as f:
@@ -485,6 +491,12 @@ class MainProgramPanel(QWidget):
         self.load_curve_panel = None
         self.requirement_panel = None
         self.run_tuning_callback = None
+        self.stop_tuning_callback = None
+        self.resume_tuning_callback = None
+        self._tuning_active = False
+        self._stopping = False
+        self._paused_operation = None
+        self._paused_text = ''
         self.input_mode = 'agent'
         self._workflow_steps = set()
         self._main_content_widgets = []
@@ -545,7 +557,11 @@ class MainProgramPanel(QWidget):
         self.send_btn = QPushButton('发送需求')
         self.send_btn.setObjectName('primaryButton')
         self.send_btn.setStyleSheet(primary_button_qss(padding='7px 14px'))
-        self.send_btn.clicked.connect(self.send_requirement)
+        self.send_btn.clicked.connect(self._send_or_stop)
+        self._task_button_timer = QTimer(self)
+        self._task_button_timer.setInterval(100)
+        self._task_button_timer.timeout.connect(self._sync_task_button)
+        self._task_button_timer.start()
         input_actions_layout.addWidget(self.send_btn)
         input_actions_layout.addStretch()
 
@@ -940,9 +956,13 @@ class MainProgramPanel(QWidget):
             self._append_debug(detail)
 
     def _append_debug(self, text: str):
+        if getattr(self.sender(), 'cancelled', False):
+            return
         self._append_chat('debug', text)
 
     def _set_progress(self, text: str):
+        if getattr(self.sender(), 'cancelled', False):
+            return
         self._set_status_text(f'状态：{text}')
 
     def _flow_state(self):
@@ -969,11 +989,15 @@ class MainProgramPanel(QWidget):
         self.route_worker.start()
 
     def _on_route_success(self, route: dict):
+        if getattr(self.sender(), 'cancelled', False):
+            return
         text = self._pending_route_text
         self._pending_route_text = ''
         self._handle_user_route(text, route)
 
     def _on_route_failure(self, error_text: str):
+        if getattr(self.sender(), 'cancelled', False):
+            return
         text = self._pending_route_text
         self._pending_route_text = ''
         fallback = self._fallback_route(text)
@@ -1193,8 +1217,27 @@ class MainProgramPanel(QWidget):
         self.chat_worker.start()
 
     def send_requirement(self):
+        if self._tuning_active or self._stopping:
+            self._append_notice('请先点击停止，待任务暂停后再发送新指令。')
+            return
         text = self.input_edit.toPlainText().strip()
         if not text:
+            return
+        if (self._paused_operation and text.strip(' 。！!') in
+                {'继续', '继续运行', '恢复', '恢复运行', '继续调优', '继续优化', '继续生成'}):
+            self._append_chat('user', text)
+            self.input_edit.clear()
+            operation, original_text = self._paused_operation, self._paused_text
+            self._paused_operation = None
+            if operation == 'tuning' and callable(self.resume_tuning_callback):
+                self.resume_tuning_callback()
+            elif operation == 'program':
+                self.generate_program()
+            elif operation == 'metrics':
+                self.send_metric_requirement(original_text)
+            else:
+                self.input_edit.setPlainText(original_text)
+                self.send_requirement()
             return
         if self.program_worker is not None and self.program_worker.isRunning():
             self._append_notice('正在生成控制程序，请稍后。')
@@ -1283,6 +1326,8 @@ class MainProgramPanel(QWidget):
         return bool(data.get('objective') or data.get('metrics') or data.get('targets'))
 
     def _assistant_busy(self):
+        if self._tuning_active:
+            return True
         if self.chat_worker is not None and self.chat_worker.isRunning():
             return True
         if self.route_worker is not None and self.route_worker.isRunning():
@@ -1294,6 +1339,63 @@ class MainProgramPanel(QWidget):
             if worker is not None and worker.isRunning():
                 return True
         return False
+
+    def _sync_task_button(self):
+        busy = self._assistant_busy()
+        if self._stopping and not busy:
+            self._stopping = False
+            self.chat_view.hide_thinking()
+            self._set_status_text('状态：已暂停，可以输入新指令或“继续运行”')
+        self.send_btn.setText('正在停止…' if self._stopping else '停止' if busy else '发送')
+        self.send_btn.setEnabled(not self._stopping)
+        self.send_btn.setToolTip('停止当前任务并保留已完成的结果' if busy else '发送指令')
+        self.run_btn.setEnabled(not busy and not self._stopping)
+        if busy:
+            if self._welcome_is_active():
+                self.show_main_content()
+            self.chat_view.show_thinking('正在停止…' if self._stopping else
+                                         self._status_text.removeprefix('状态：'))
+        else:
+            self.chat_view.hide_thinking()
+
+    def set_tuning_active(self, active: bool):
+        self._tuning_active = active
+        self._sync_task_button()
+
+    def _send_or_stop(self):
+        if self._assistant_busy():
+            self.stop_current_task()
+        else:
+            self.send_requirement()
+
+    def stop_current_task(self):
+        if self._stopping:
+            return
+        self._stopping = True
+        if self._tuning_active:
+            self._paused_operation = 'tuning'
+            if callable(self.stop_tuning_callback):
+                self.stop_tuning_callback()
+        elif self.program_worker is not None and self.program_worker.isRunning():
+            self._paused_operation = 'program'
+        elif self.requirement_panel is not None and self.requirement_panel.chat_worker is not None and self.requirement_panel.chat_worker.isRunning():
+            self._paused_operation = 'metrics'
+            self._paused_text = self.requirement_panel._last_user_input or ''
+        else:
+            self._paused_operation = 'chat'
+            self._paused_text = (self._pending_route_text if self.route_worker is not None and self.route_worker.isRunning()
+                                 else self._pending_program_text if self._chat_task == 'program_refine'
+                                 else getattr(self.chat_worker, 'user_prompt', ''))
+        workers = [self.chat_worker, self.route_worker, self.program_worker]
+        if self.requirement_panel is not None:
+            workers.append(self.requirement_panel.chat_worker)
+        for worker in workers:
+            if worker is not None and worker.isRunning():
+                worker.cancel()
+        self._auto_tuning_started = False
+        self.chat_view.hide_thinking()
+        self._append_notice('正在停止当前任务；已完成的结果和参数会保留。停止后可输入新指令或“继续运行”。')
+        self._sync_task_button()
 
     def _auto_start_tuning_if_ready(self, force: bool = False, announce: bool = True, confirmed: bool = False):
         missing = []
@@ -1515,6 +1617,8 @@ class MainProgramPanel(QWidget):
         return '\n'.join(plan_lines)
 
     def on_chat_success(self, reply: str):
+        if getattr(self.sender(), 'cancelled', False):
+            return
         self.chat_view.hide_thinking()
         if self._chat_task == 'answer':
             self._append_chat('assistant', reply)
@@ -1559,17 +1663,24 @@ class MainProgramPanel(QWidget):
         return text or '请描述原始应用场景或控制目标，例如吸尘器驱动、伺服位置控制、电流环控制或调速驱动。'
 
     def on_chat_failure(self, error_text: str):
+        if getattr(self.sender(), 'cancelled', False):
+            return
         self.chat_view.hide_thinking()
         self._append_error('对话失败，请检查设置与网络。', error_text)
         self._set_status_text('状态：对话失败，请检查设置与网络')
 
     def on_chat_finished(self):
+        if self.sender() is not None and self.sender() is not self.chat_worker:
+            return
         self.chat_view.hide_thinking()
         self._chat_task = None
         if not self._assistant_busy():
             self.send_btn.setEnabled(True)
 
     def generate_program(self):
+        if self._tuning_active or self._stopping:
+            self._append_notice('请先停止当前任务，再生成程序。')
+            return
         if self.program_worker is not None and self.program_worker.isRunning():
             self._append_notice('正在生成控制程序，请稍后。')
             return
@@ -1616,6 +1727,8 @@ class MainProgramPanel(QWidget):
         self.program_worker.start()
 
     def _on_program_generation_success(self, result: dict):
+        if getattr(self.sender(), 'cancelled', False):
+            return
         self._set_status_text('状态：生成完成')
         self._append_debug('所有 candidate 控制器程序已生成。根目录 src 未被修改。')
         if callable(self.structure_refresh_callback):
@@ -1623,10 +1736,14 @@ class MainProgramPanel(QWidget):
         self.show_load_curve_card()
 
     def _on_program_generation_failure(self, error_text: str):
+        if getattr(self.sender(), 'cancelled', False):
+            return
         self._set_status_text('状态：调用失败')
         self._append_error('生成过程中发生异常。', error_text)
 
     def _on_program_generation_finished(self):
+        if self.sender() is not None and self.sender() is not self.program_worker:
+            return
         self.chat_view.hide_thinking()
         self.send_btn.setEnabled(True)
         self.run_btn.setEnabled(True)
@@ -1657,17 +1774,7 @@ class MainProgramPanel(QWidget):
             self._append_error('未找到已完成轮次的 round_feedback.json，请先完整运行一轮调优。')
             return
         next_round = current_round + 1
-        next_profiles = rounds_root / f'round_{next_round:02d}' / 'candidate_profiles.json'
-        if not next_profiles.exists():
-            self._append_debug(f'正在生成第 {next_round} 轮方案策略（需要调用 LLM）...')
-            try:
-                from Competition.next_round_strategy import generate_next_round_strategy
-                generate_next_round_strategy(project_json_path,
-                                             from_round=current_round,
-                                             to_round=next_round)
-            except Exception as exc:
-                self._append_error(f'无法生成第 {next_round} 轮策略：{exc}')
-                return
+        # Strategy generation runs in the stoppable competition subprocess.
         self._append_notice(f'正在启动第 {next_round} 轮调优（将自动 generate + optimize）...')
         if callable(self.run_tuning_callback):
             try:
@@ -1706,6 +1813,9 @@ class MainProgramPanel(QWidget):
             pass
 
     def _load_chat_record(self):
+        project = self._project_json_path()
+        self._paused_operation = ('tuning' if project and
+                                  (Path(project).parent / 'log/ui/paused_task.json').exists() else None)
         self._detach_workflow_panels()
         self.chat_view.clear_messages()
         self.chat_history = []

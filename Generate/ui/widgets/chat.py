@@ -9,11 +9,12 @@ from PyQt5.QtWidgets import (
     QWidget,
     QVBoxLayout,
 )
-from PyQt5.QtCore import QSize, Qt, QThread, QTimer, pyqtSignal
+from PyQt5.QtCore import QSize, Qt, QThread, QTimer, QEventLoop, QUrl, pyqtSignal
+from PyQt5.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply, QNetworkProxy
 from PyQt5.QtGui import QMovie
 import json
 import os
-import urllib.error
+import time
 import urllib.request
 
 import core.paths  # ensures repository roots are on sys.path
@@ -465,6 +466,10 @@ class ChatStreamWidget(QWidget):
 
     def show_thinking(self, text: str = '正在思考中'):
         if self._thinking_row is not None:
+            if self._thinking_widget.text_label.text() != text:
+                self._thinking_widget.text_label.setText(text)
+                self._update_bubble_widths()
+                self._scroll_to_bottom()
             return
 
         row = QWidget()
@@ -570,25 +575,47 @@ def call_ui_chat_model(user_prompt: str, system_prompt: str, temperature: float 
             {'role': 'user', 'content': user_prompt},
         ],
     }
-    body = json.dumps(payload).encode('utf-8')
-    request = urllib.request.Request(
-        url,
-        data=body,
-        headers={
-            'Content-Type': 'application/json',
-            'Authorization': f'Bearer {api_key}',
-        },
-        method='POST',
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            response_body = response.read().decode('utf-8')
-            data = json.loads(response_body)
-    except urllib.error.HTTPError as error:
-        detail = error.read().decode('utf-8', errors='ignore')
-        raise RuntimeError(f'HTTPError {error.code}: {detail}') from error
-    except urllib.error.URLError as error:
-        raise RuntimeError(f'网络错误: {error}') from error
+    thread = QThread.currentThread()
+
+    if thread.isInterruptionRequested():
+        raise InterruptedError('任务已停止')
+    manager = QNetworkAccessManager()
+    endpoint = QUrl(url)
+    proxies = urllib.request.getproxies()
+    proxy_url = proxies.get(endpoint.scheme())
+    if proxy_url and not urllib.request.proxy_bypass(endpoint.host()):
+        proxy = QUrl(proxy_url)
+        manager.setProxy(QNetworkProxy(QNetworkProxy.HttpProxy, proxy.host(), proxy.port(80),
+                                       proxy.userName(), proxy.password()))
+    request = QNetworkRequest(endpoint)
+    request.setHeader(QNetworkRequest.ContentTypeHeader, 'application/json')
+    request.setRawHeader(b'Authorization', f'Bearer {api_key}'.encode('utf-8'))
+    reply = manager.post(request, json.dumps(payload).encode('utf-8'))
+    loop = QEventLoop()
+    timer = QTimer()
+    started = time.monotonic()
+
+    def check_stop():
+        if thread.isInterruptionRequested() or time.monotonic() - started >= timeout:
+            reply.abort()
+
+    timer.timeout.connect(check_stop)
+    timer.start(100)
+    reply.finished.connect(loop.quit)
+    if not reply.isFinished():
+        loop.exec_()
+    timer.stop()
+    if thread.isInterruptionRequested():
+        raise InterruptedError('任务已停止')
+    if time.monotonic() - started >= timeout:
+        raise RuntimeError('网络请求超时')
+    body = bytes(reply.readAll()).decode('utf-8')
+    status = reply.attribute(QNetworkRequest.HttpStatusCodeAttribute)
+    if status and int(status) >= 400:
+        raise RuntimeError(f'HTTPError {status}: {body}')
+    if reply.error() != QNetworkReply.NoError:
+        raise RuntimeError(f'网络错误: {reply.errorString()}')
+    data = json.loads(body)
 
     choices = data.get('choices') or []
     if not choices:
@@ -600,7 +627,19 @@ def call_ui_chat_model(user_prompt: str, system_prompt: str, temperature: float 
     return content
 
 
-class ChatWorker(QThread):
+class CancellableWorker(QThread):
+    cancelled = False
+
+    def cancel(self):
+        self.cancelled = True
+        self.requestInterruption()
+
+    def check_cancelled(self):
+        if self.cancelled or self.isInterruptionRequested():
+            raise InterruptedError('任务已停止')
+
+
+class ChatWorker(CancellableWorker):
     success = pyqtSignal(str)
     failure = pyqtSignal(str)
 
@@ -612,9 +651,11 @@ class ChatWorker(QThread):
     def run(self):
         try:
             result = call_ui_chat_model(self.user_prompt, self.system_prompt)
-            self.success.emit(result)
+            if not self.cancelled:
+                self.success.emit(result)
         except Exception as exc:
-            self.failure.emit(str(exc))
+            if not self.cancelled:
+                self.failure.emit(str(exc))
 
 
 class TranslationWorker(QThread):
